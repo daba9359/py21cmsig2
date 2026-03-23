@@ -70,6 +70,7 @@ omL0 = 1-omM0
 f_He = 0.08    # Fraction of Helium by number
 y_P = 0.2454  # Fraction of helium by mass (from Planck VI 2018) 
 p_crit = 1.88e-29*h**2  # [g / cm^-3] The critical density of the universe
+p_crit_ergs = p_crit*8.99e20  #[ergs/cm^3]
 m_p = 1.6727e-24   #[g]  mass of a proton
 m_pMev = 938.28   # [MeV/c^2] mass of a proton
 m_e = 9.1094e-28   #[g]  mass of an electron
@@ -134,6 +135,8 @@ k_eH = scipy.interpolate.CubicSpline(k_eH_raw.transpose()[0],k_eH_raw.transpose(
 
 n_H = lambda z,x_e: n_b0*(1+z)**3*(1-x_e(z))
 n_e = lambda z,x_e: n_b0*(1+z)**3*(x_e(z))
+n_tot = lambda z: n_b0*(1+z)**3
+
 n_H_modH0 = lambda z,x_e,n_b0: n_b0*(1+z)**3*(1-x_e(z))
 n_e_modH0 = lambda z,x_e,n_b0: n_b0*(1+z)**3*(x_e(z))
 
@@ -328,7 +331,7 @@ def lambdaCDM_training_set(frequency_array,parameters,N,verbose=True):
     ===================================================
     frequency_array: array of frequencies to calculate the curve at. array-like.
     parameters: Set of mean values and standard deviation of your parameters. Make sure the order matches the order of the function
-                As of writing this that order is: omR0,omM0,omK0,omL0,omB0. Shape should be, in this example, (5,2), with the first 
+                As of writing this that order is: omR0,omM0,omK0,omL0,omB0,H0. Shape should be, in this example, (5,2), with the first 
                 column being the mean and the second being the standard deviation.
     N: The number of curves you would like to have in your training set. Interger
     bin_number: The number of bins in frequency space used to make the curves. Recommend 250 for LuSEE-Night as of the time writing this.
@@ -1026,6 +1029,331 @@ def ERB_training_set(frequency_array,parameters,N,T_k=My_Tk[1],x_e=camb_xe_inter
         training_set[n] = interpolator(redshift_array_mod)
     
     return training_set, training_set_params, training_set_rs
+
+    # we need to test out a different version of n_H:
+n_H_mod = lambda z,x_e: n_b0*(1+z)**3*(1-x_e) 
+n_e_mod = lambda z,x_e: n_b0*(1+z)**3*(x_e)
+
+def Tk_PBH (z_array,m_bh,obh0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0,H0=H0):
+    """Creates an array evolving the IGM temperature based on adiabatic cooling, compton scattering, and dark matter sefl-annihilation. Only works for the cosmic 
+    Dark Ages, as it does not include UV.
+    
+    ===================================================================
+    Parameters
+    ===================================================================
+    z_array: an array of increasing redshift values. Needs to be a sufficiently fine grid. 
+    As of now there is some considerable numerical instabilities when your z grid is > 0.01
+
+    m_bh = mass of the primordial black holes
+    obh0 = density parameter of primordial black holes today.
+
+    ===================================================================
+    Output
+    ===================================================================
+    Tk_array:  A 2-D array with each entry being the redshift and IGM temperature
+    Tk_function: Interpolated version of your Tk_array that acts like a function with
+    redshift for its argument. Useful for future calculations.
+    xe_function: Interpolation function for the fraction of free electrons
+    xe_array: Array created from the x_e function."""
+
+    num=len(z_array)
+    t_c = lambda z: 1.172e8*((1+z)/10)**(-4) * 3.154e7 #[seconds] timescale of compton scattering
+    old_x_e = camb_xe_interp   # this is our model for fraction of free electrons
+    Tk_array = np.ones((num-1,2))   # creates a blank array for use below
+    z_start = z_array[-1]
+    z_end = z_array[0]
+    ## Some important constants
+    g_i = 0.3333      # fraction of energy deposited into ionization
+    g_e = 0.3333      # fraction of energy depostied into excitation of hydrogen and helium
+    g_h = 0.3333      # fraction of energy deposited into the IGM
+    E_i = 13.6     # [eV] energy of ground state hydrogen
+    E_e = 3.4      # [eV] energy of other states of hydrogen (took the next largest)
+    C = 0.5     # efficiency of the excitation in transfering energy to ionizing the IGM. Should be between 0 to 1. 1 being maximally inefficient.
+    phi_e = 0.142     # portion of the Hawking radiation spectrum that goes towards creating electron positron pairs
+    phi_gamma = 0.06        # portion of the Hawking radiation spectrum that goes towards creating photons
+    g2eV = 5.61e32      #[ev/gram] converts from grams to eV (need to have the critical density of the universe in units of energy, not mass for this.)
+
+    #This defines our right hand side function (turns out dxe/dz isn't needed. Too weak to cause any major effects during the dark ages.)
+    delta_z = np.abs(z_array[1]-z_array[0])
+    standard_dxe_dz = scipy.interpolate.CubicSpline(z_array,np.gradient(old_x_e(z_array))*(1/delta_z)) # standard electron fraction model based on camb
+    PBH_dxe_dz = lambda z,xe:  (g_i/(n_H_mod(z,xe)*E_i)+(1-C)*(g_e/(n_H_mod(z,xe)*E_e)))*(5.34e25*(phi_e+phi_gamma)**2*p_crit*g2eV*obh0*(1+z)**2/(m_bh**3*H(z,omR0,omM0,omK0,omL0,H0)))
+    
+    ################ We are right here in our conversion from DMD to PBH
+    
+    func_xe = lambda z,xe: standard_dxe_dz(z)-PBH_dxe_dz(z,xe)  # total rate of change of free electrons
+
+    #Initial conditions
+    xe_0 = np.array([old_x_e(z_array[-1])])    # sets our initial condition at our starting redshift (usually 1100 for dark age stuff)
+
+    # Time span
+    z_span = (z_start, z_end)
+
+    # Solve the differential equation
+    sol = solve_ivp(func_xe, z_span, xe_0, dense_output=True, method='Radau')
+
+    # Access the solution
+    z = sol.t
+    xe = sol.y[0]
+
+    xe_function=scipy.interpolate.CubicSpline(z[::-1],xe[::-1])
+    x_e = xe_function
+    xe_array = np.array([z,xe])
+         
+    # g_h = lambda z: (1+2*x_e(z))/3
+
+
+## Let's code up T_k
+    ## The heating / cooling processes ##
+    
+    adiabatic = lambda zs,T:(1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*(2*H(zs,omR0,omM0,omK0,omL0,H0)*T)
+    compton = lambda zs,T: (1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*((x_e(zs))/(1+f_He+x_e(zs)))*((T_gamma(zs)-T)/(t_c(zs)))
+    pbh = lambda zs,m_bh,obh0: (2*g_h/(kb_ev*n_H_mod(zs,x_e(zs))*(1+f_He+x_e(zs))))*(5.34e25*(phi_e+phi_gamma)**2*p_crit*g2eV*obh0*(1+zs)**2/(m_bh**3*H(zs,omR0,omM0,omK0,omL0,H0)))    # primordial black holes
+
+    T0 = np.array([T_gamma(z_array[-1])])   # your initial temperature at the highest redshift. This assumes it is coupled fully to the CMB at that time.
+    z0 = z_array[-1]    # defines your starting z (useful for the loop below)
+    z_span = (z_start,z_end)
+    func = lambda z,T: adiabatic(z,T) - compton(z,T) - pbh(z,m_bh,obh0)
+
+    # Solve the differential equation
+    sol = solve_ivp(func, z_span, T0, dense_output=True, method='Radau')
+
+    # Access the solution
+    z = sol.t
+    T = sol.y[0]
+
+    Tk_function=scipy.interpolate.CubicSpline(z[::-1],T[::-1])  # Turns our output into a function with redshift as an argument  
+    Tk_array = np.array([z,T])   
+    return Tk_array, Tk_function, x_e, xe_array
+
+
+def PBH_training_set(frequency_array,parameters,N,verbose=True):
+    """"Creates a training set based on the formulation of the Primordial Black Hole (PBH) theory in Clark et al. 2018.
+
+    Parameters
+    ===================================================
+    frequency_array: array of frequencies to calculate the curve at. array-like.
+    parameters: Set of lower and upper bounds for each parameter. Should be shape (2,2), one row each for the mass of the black holes (m_bh)
+                and the density parameter of primordial black holes (obh0). NOTE: set obh0 = 0 if you want it to follow the linear
+                restrictions from Clark et al. 2018 based on the corresponding mass of the black hole.
+    N: The number of curves you would like to have in your training set. Interger
+    
+    Returns
+    ====================================================
+    training_set: An array with your desired number of varied fiducial 21 cm curves
+    training_set_params: Parameters associated with each curve."""
+    conversion = lambda f: 1420.4/f-1 # converts between redshift and frequency
+    max_z = conversion(frequency_array[0])
+    if max_z > 1100:
+        max_z = 1100
+        print(f"Your largest redshift is {max_z}, which is before recombination. This functions will set your largest redshift equal to recombination for calculation. \
+This will likely make your plot look odd at frequencies larger than around 1.5 MHz")
+    else:
+        max_z = max_z
+    redshift_array = np.arange(conversion(frequency_array[-1]),max_z)
+    new_redshift_array = 1420.4/frequency_array-1 
+    new_redshift_array = new_redshift_array[::-1]
+    training_set = np.ones((N,len(new_redshift_array)))    # dummy array for the expanded training set
+    training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
+    x_e = camb_xe_interp
+    if parameters[1][0] == 0:
+        power_mbh_low = np.log10(parameters[0][0])
+        power_mbh_high = np.log10(parameters[0][1])
+        random_power_mbh = np.random.uniform(power_mbh_low,power_mbh_high,N)
+        training_set_params[:,0] = 10**random_power_mbh
+        power_obh0_func = lambda power_m_bh: 3*power_m_bh-52
+        power_obh0_high=power_obh0_func(random_power_mbh)
+        power_obh0_low = -9
+        random_power_obh0 = np.random.uniform(power_obh0_low,power_obh0_high,N)
+        training_set_params[:,1] = 10**random_power_obh0
+
+    else:
+        training_set_params[:,0] = np.random.uniform(parameters[0][0],parameters[0][1],N)
+        training_set_params[:,1] = np.random.uniform(parameters[1][0],parameters[1][1],N)        
+
+
+    if verbose:
+        for n in tqdm(range(N)):
+            m_bh,obh0=training_set_params[n]
+            T_k = Tk_PBH(redshift_array,m_bh,obh0)   # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(new_redshift_array,T_k[2],T_k[1],omB0,omM0)*10**(-3)   # Need to convert back to Kelvin
+            dTb_element=dTb_element[::-1]   # You have to flip it again because of the way dTb calculates based on redshift (needs previous higher redshift to calculate next redshift)
+            training_set[n] = dTb_element
+    else:
+        for n in range(N):
+            m_bh,obh0=training_set_params[n]
+            T_k = Tk_PBH(redshift_array,m_bh,obh0)   # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(new_redshift_array,T_k[2],T_k[1],omB0,omM0)*10**(-3)   # Need to convert back to Kelvin
+            dTb_element=dTb_element[::-1]   # You have to flip it again because of the way dTb calculates based on redshift (needs previous higher redshift to calculate next redshift)
+            training_set[n] = dTb_element
+    # interpolator = scipy.interpolate.CubicSpline(redshift_array,dTb_element)
+
+
+    
+    
+    return training_set, training_set_params, redshift_array
+
+# we need to test out a different version of n_H:
+# n_H_mod = lambda z,x_e: n_b0*(1+z)**3*(1-x_e) 
+# n_e_mod = lambda z,x_e: n_b0*(1+z)**3*(x_e)
+
+def Tk_PMF (z_array,n_b,B_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0,H0=H0):
+    """Creates an array evolving the IGM temperature based on adiabatic cooling, compton scattering, and dark matter sefl-annihilation. Only works for the cosmic 
+    Dark Ages, as it does not include UV.
+    
+    ===================================================================
+    Parameters
+    ===================================================================
+    z_array: an array of increasing redshift values. Needs to be a sufficiently fine grid. 
+    As of now there is some considerable numerical instabilities when your z grid is > 0.01
+
+    n_b: spectral index of the power spectrum of the primordial black holes
+    B_0: Average strength of the primordial magnetic field
+
+    ===================================================================
+    Output
+    ===================================================================
+    Tk_array:  A 2-D array with each entry being the redshift and IGM temperature
+    Tk_function: Interpolated version of your Tk_array that acts like a function with
+    redshift for its argument. Useful for future calculations.
+    xe_function: Interpolation function for the fraction of free electrons
+    xe_array: Array created from the x_e function."""
+
+    num=len(z_array)
+    t_c = lambda z: 1.172e8*((1+z)/10)**(-4) * 3.154e7 #[seconds] timescale of compton scattering
+    x_e = camb_xe_interp   # this is our model for fraction of free electrons
+    Tk_array = np.ones((num-1,2))   # creates a blank array for use below
+    z_start = z_array[-1]
+    z_end = z_array[0]
+    g2eV = 5.61e32 
+    z_rec = 1100    # redshift of recombination
+    m = 2*(n_b+3)/(n_b+5)
+    kd_rec = (30.3*(1+z_rec)**(5/2)*np.pi**n_b*(1/B_0)**2*x_e(z_rec)*np.sqrt(omM0)*omB0*h**5)**(1/(n_b+5))
+    fL = 0.8313*(n_b+3)**1.105*(1.0-0.0102*(n_b+3))
+    ## Some important constants
+
+
+    ## Some important equations
+    f_D = lambda z, rho_mf: ((rho_mf)/(3.98e-20*B_0**2*(1+z)**4))**(1/(n_b+3))
+    a = lambda z, rho_mf: np.log(1+(14.8)/(B_0*f_D(z,rho_mf)*kd_rec))
+    Gamma_dt = lambda z,rho_mf: 5.97e-20*(B_0)**2*(1+z)**4*H(z,omR0,omM0,omK0,omL0,H0)*f_D(z,rho_mf)**(n_b+3)*(m*a(z,rho_mf)**m)/((a(z,rho_mf)+1.5*np.log((1+z_rec)/(1+z)))**(m+1))  
+    rho_mf_0_func = lambda B_0: 3.98e-20*B_0**2*(1+z_rec)**4
+
+    ## rho_mf is a differential equation
+    rho_mf_0 = np.array([rho_mf_0_func(B_0)])
+    z0 = z_array[-1]
+    z_span = (z_start,z_end)
+    func = lambda z,rho_mf: 4*rho_mf/(1+z) + (Gamma_dt(z,rho_mf))/((1+z)*H(z,omR0,omM0,omK0,omL0,H0))
+
+    # Solve the differential equation
+    sol = solve_ivp(func, z_span, rho_mf_0, dense_output=True, method='Radau')
+    
+    # Access the solution
+    z = sol.t
+    rho_mf = sol.y[0]
+
+    rhomf_function=scipy.interpolate.CubicSpline(z[::-1],rho_mf[::-1])  # Turns our output into a function with redshift as an argument  
+    rhomf_array = np.array([z,rho_mf])   
+
+
+    f_D = lambda z: (((rhomf_function(z))/(3.98e-20*B_0**2*(1+z)**4))**(1/(n_b+3)))
+    a = lambda z: np.log(1+(14.8)/(B_0*f_D(z)*kd_rec))
+    Gamma_dt = lambda z: 5.97e-20*(B_0)**2*(1+z)**4*H(z,omR0,omM0,omK0,omL0,H0)*f_D(z)**(n_b+3)*(m*a(z)**m)/((a(z)+1.5*np.log((1+z_rec)/(1+z)))**(m+1)) 
+    Gamma_amb = lambda z,T: (8.52e-103*x_e(z))/(T**0.375*(1-x_e(z)))*f_D(z)**(2*n_b+8)*(((B_0)**2*(1+z)**5)*kd_rec/(p_crit_ergs*(1+z)**3*omB0))**2*fL
+    Gamma_pmf = lambda z,T: Gamma_dt(z)+Gamma_amb(z,T)
+    f_Dnb = lambda z: (rhomf_function(z))/(3.98e-20*B_0**2*(1+z)**4)
+
+## Let's code up T_k
+    # The heating / cooling processes ##
+    
+    adiabatic = lambda zs,T:(1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*(2*H(zs,omR0,omM0,omK0,omL0,H0)*T)
+    compton = lambda zs,T: (1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*((x_e(zs))/(1+f_He+x_e(zs)))*((T_gamma(zs)-T)/(t_c(zs)))
+    pmf = lambda zs,T: -(2*Gamma_pmf(zs,T))/(3*n_tot(zs)*kb*(1+zs)*(H(zs,omR0,omM0,omK0,omL0,H0)))    # primordial magnetic fields
+
+    T0 = np.array([T_gamma(z_array[-1])])   # your initial temperature at the highest redshift. This assumes it is coupled fully to the CMB at that time.
+    z0 = z_array[-1]    # defines your starting z (useful for the loop below)
+    z_span = (z_start,z_end)
+    func = lambda z,T: adiabatic(z,T) - compton(z,T) + pmf(z,T)
+
+    # Solve the differential equation
+    sol = solve_ivp(func, z_span, T0, dense_output=True, method='Radau')
+
+    # Access the solution
+    z = sol.t
+    T = sol.y[0]
+
+    Tk_function=scipy.interpolate.CubicSpline(z[::-1],T[::-1])  # Turns our output into a function with redshift as an argument  
+    Tk_array = np.array([z,T])   
+    a_func = lambda z: (a(z)+1.5*np.log((1+z_rec)/(1+z)))**(m+1)*f_Dnb(z)
+    return Tk_array, Tk_function, rhomf_function, rhomf_array, f_Dnb
+
+
+def PMF_training_set(frequency_array,parameters,N,verbose=True):
+    """"Creates a training set based on the formulation of the Primordial Black Hole (PBH) theory in Clark et al. 2018.
+
+    Parameters
+    ===================================================
+    frequency_array: array of frequencies to calculate the curve at. array-like.
+    parameters: Set of lower and upper bounds for each parameter. Should be shape (2,2), one row each for the mass of the black holes (m_bh)
+                and the density parameter of primordial black holes (obh0). NOTE: set obh0 = 0 if you want it to follow the linear
+                restrictions from Clark et al. 2018 based on the corresponding mass of the black hole.
+    N: The number of curves you would like to have in your training set. Interger
+    
+    Returns
+    ====================================================
+    training_set: An array with your desired number of varied fiducial 21 cm curves
+    training_set_params: Parameters associated with each curve."""
+    conversion = lambda f: 1420.4/f-1 # converts between redshift and frequency
+    max_z = conversion(frequency_array[0])
+    if max_z > 1100:
+        max_z = 1100
+        print(f"Your largest redshift is {max_z}, which is before recombination. This functions will set your largest redshift equal to recombination for calculation. \
+This will likely make your plot look odd at frequencies larger than around 1.5 MHz")
+    else:
+        max_z = max_z
+    redshift_array = np.arange(conversion(frequency_array[-1]),max_z)
+    new_redshift_array = 1420.4/frequency_array-1 
+    new_redshift_array = new_redshift_array[::-1]
+    training_set = np.ones((N,len(new_redshift_array)))    # dummy array for the expanded training set
+    training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
+    x_e = camb_xe_interp
+    # if parameters[1][0] == 0:
+    #     power_mbh_low = np.log10(parameters[0][0])
+    #     power_mbh_high = np.log10(parameters[0][1])
+    #     random_power_mbh = np.random.uniform(power_mbh_low,power_mbh_high,N)
+    #     training_set_params[:,0] = 10**random_power_mbh
+    #     power_obh0_func = lambda power_m_bh: 3*power_m_bh-52
+    #     power_obh0_high=power_obh0_func(random_power_mbh)
+    #     power_obh0_low = -9
+    #     random_power_obh0 = np.random.uniform(power_obh0_low,power_obh0_high,N)
+    #     training_set_params[:,1] = 10**random_power_obh0
+
+    # else:
+    training_set_params[:,0] = np.random.uniform(parameters[0][0],parameters[0][1],N)
+    training_set_params[:,1] = np.random.uniform(parameters[1][0],parameters[1][1],N)        
+
+
+    if verbose:
+        for n in tqdm(range(N)):
+            n_b,B_0=training_set_params[n]
+            T_k = Tk_PMF(redshift_array,n_b,B_0)   # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(new_redshift_array,x_e,T_k[1],omB0,omM0)*10**(-3)   # Need to convert back to Kelvin
+            dTb_element=dTb_element[::-1]   # You have to flip it again because of the way dTb calculates based on redshift (needs previous higher redshift to calculate next redshift)
+            training_set[n] = dTb_element
+    else:
+        for n in range(N):
+            n_b,B_0=training_set_params[n]
+            T_k = Tk_PMF(redshift_array,n_b,B_0)   # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(new_redshift_array,x_e,T_k[1],omB0,omM0)*10**(-3)   # Need to convert back to Kelvin
+            dTb_element=dTb_element[::-1]   # You have to flip it again because of the way dTb calculates based on redshift (needs previous higher redshift to calculate next redshift)
+            training_set[n] = dTb_element
+    # interpolator = scipy.interpolate.CubicSpline(redshift_array,dTb_element)
+
+
+    
+    
+    return training_set, training_set_params, redshift_array
+
+
 
 
 #####################################################################################################################################################################
@@ -2147,7 +2475,7 @@ def training_set_test(training_set,noise,num_divisions=10,num_basis_vectors=100,
 def extraction_statistics(N,systematics_training_set,signal_training_set,data,noise,signal,systematics,frequency_array,IC="DIC",verbose=True,plot=True,num_basis_vectors=100,num_sys_vectors = 50, \
                        num_sig_vectors = 10, title = "CDF ", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,display_type = "CDF", test_mode = "random noise",num_divisions=10\
                         ,N_antenna=N_antenna,dnu=dnu,dt=dt,save_path = "",use_fit_noise=False,xlim=None,training_set_to_test = "systematics",restrict_runs=0, multi_spectra = False,priors=False,\
-                            sigma_plot = 3):
+                            sigma_plot = 3,vertical_lines=None):
     """Evaluates a set of statistics based on input systematics and signal vs extraction. This requires you to know the foreground and signal
     inputs. It is designed to be a test of the pipeline, not a test of the data.
     
@@ -2268,6 +2596,66 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
 
         if (test_mode == "random noise") & (multi_spectra == True):
             sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,signal,N_antenna,dnu,dt)
+            extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+            chi_squared_array[n] = extraction[0].reduced_chi_squared
+            psi_squared_array[n] = extraction[0].psi_squared
+            if use_fit_noise:
+                systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics.flatten())/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
+                signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
+            else:
+                systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics.flatten())/noise.flatten() # determines the bias in the systematics normalized to the radiometer noise
+                signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/noise       # determines the bias in the signal normalized to the radiometer noise
+
+            rms_array_systematics[n] = ((systematics_diff**2).mean())**(1/2)
+            rms_array_signal[n] = ((signal_diff**2).mean())**(1/2)
+        
+            if display_type == "cumulative sigmas":
+                extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
+                systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
+
+            if (plot == True) & (display_type == "cumulative"):
+                plt.plot(frequency_array,extraction[0].subbasis_channel_mean("signal"),color="blue",alpha=0.5)
+                plt.xticks(ticks=np.arange(5,51,1),minor=True)
+                plt.xticks(size=20)
+                plt.xlabel("Frequency [MHz]",fontsize=15)
+                plt.yticks(fontsize=15)
+                plt.ylabel(r"$\delta T_b$ [K]",fontsize=15)
+                plt.title(f"{title} {N} Extractions", fontsize=20)
+
+        if (test_mode == "goodness of fit") & (multi_spectra == False):
+            random_signal = signal_training_set[int(np.random.uniform(0,len(signal_training_set)))]
+            sim_data = py21cmsig.simulation_run(systematics,random_signal,N_antenna,dnu,dt)
+            extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+            chi_squared_array[n] = extraction[0].reduced_chi_squared
+            psi_squared_array[n] = extraction[0].psi_squared
+            if use_fit_noise:
+                systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics)/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
+                signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
+            else:
+                systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics)/noise # determines the bias in the systematics normalized to the radiometer noise
+                signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/noise       # determines the bias in the signal normalized to the radiometer noise
+
+            rms_array_systematics[n] = ((systematics_diff**2).mean())**(1/2)
+            rms_array_signal[n] = ((signal_diff**2).mean())**(1/2)
+        
+            if display_type == "cumulative sigmas":
+                extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
+                systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
+
+            if (plot == True) & (display_type == "cumulative"):
+                plt.plot(frequency_array,extraction[0].subbasis_channel_mean("signal"),color="blue",alpha=0.5)
+                plt.xticks(ticks=np.arange(5,51,1),minor=True)
+                plt.xticks(size=20)
+                plt.xlabel("Frequency [MHz]",fontsize=15)
+                plt.yticks(fontsize=15)
+                plt.ylabel(r"$\delta T_b$ [K]",fontsize=15)
+                plt.title(f"{title} {N} Extractions", fontsize=20)
+
+        if (test_mode == "goodness of fit") & (multi_spectra == True):
+            random_signal = signal_training_set[int(np.random.uniform(0,len(signal_training_set)))]
+            sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,random_signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
                         num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
@@ -2455,6 +2843,18 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         plt.grid()
         plt.legend()
 
+    if (plot == True) & (display_type == "histogram") & (test_mode == "goodness of fit"):
+        plt.hist(chi_squared_array,color="blue",alpha=0.5)
+        plt.axvline(vertical_lines)
+        plt.xticks(size=20)
+        plt.xlabel(r"$\chi^2_{red}$",fontsize=15)
+        plt.yticks(fontsize=15)
+        plt.ylabel("counts")
+        plt.title(fr"{title} {N} Extractions", fontsize=20)
+        plt.grid()
+        plt.legend()
+
+
     # difference metric calculations
     max_sys = (rms_array_systematics-rms_array_systematics.mean()).max()
     max_sig = (rms_array_signal-rms_array_signal.mean()).max()
@@ -2468,6 +2868,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             print(f"Mean Reduced Chi Squared: {chi_squared_array.mean()}")
             print(f"STD of Reduced Chi Squared Distribution: {chi_squared_array.std()}")
 
+    if test_mode == "goodness of fit":
+        return extractions_array,chi_squared_array, psi_squared_array, systematics_array,extraction[0], extraction[1], extraction, signal_terms_used, systematics_terms_used 
     if test_mode == "random noise":
         return extractions_array, mean,sigma1,sigma2,sigma3,chi_squared_array, psi_squared_array, systematics_array,extraction[0],mean_sys, extraction[1], extraction, signal_terms_used, systematics_terms_used
     if test_mode == "training set size":
@@ -3428,3 +3830,401 @@ def make_foreground_updated (frequencies,sky_map,frequency_range,spectral_index_
             temps_per_region[r][f] = new_foreground[f][region_indices[r]].mean()
 
     return new_foreground, region_indices, temps_per_region, optimized_parameters
+
+def create_BTS_curves (frequencies,frequency_range,B_values,sky_map,n_regions,spectral_index_map,n_LSTs):
+    """Create the BTS_curves needed as an input for other functions.
+
+    Parameters
+    ==============================================================
+    frequencies: The frequencies you would like your BTS_curves to be interpolated over. Important for matching the input of your other functions.
+    frequency_range: The frequency array that pertains to your sky maps.
+    B_values: The B_values associated with the regions you've created to model the foreground. Must be same number of frequency bins as your sky_map
+    sky_map: The base model of your foreground. Should be shape (frequency bins, pixel count)
+    n_regions: Number of regions used to create your regions for your foreground model
+    spectral_index_map: The spectral index map used to create your regions for your foreground model.
+    n_LSTs: Number of LSTs in this BTS_curve set.
+
+    Returns
+    =============================================================="""
+    patch=perses.models.PatchyForegroundModel(frequencies,spectral_index_map,n_regions) # define the regional patches
+    region_indices = patch.foreground_pixel_indices_by_region_dictionary
+    BTS_curves_raw = np.zeros((n_LSTs,len(B_values[0]),len(sky_map[0])))
+    BTS_curves = np.zeros((n_LSTs,len(B_values[0]),len(frequencies)))
+    for l in range(n_LSTs):
+        for BTS in tqdm(range(len(B_values[0]))):
+            for f in range(len(sky_map[0])):
+                for r in range(n_regions):
+                    BTS_curves_raw[l,BTS,f] += (sky_map[l,f,region_indices[r]]*B_values[l,BTS,f,r]).sum()/len(region_indices[r])
+            interpolator = scipy.interpolate.CubicSpline(frequency_range,BTS_curves_raw[l,BTS,:])
+            BTS_curves[l,BTS,:] = interpolator(frequencies)
+    return BTS_curves
+
+def synchrotron_foreground_updated_given_Bvalues(N,n_regions,frequencies,spectral_index_map,sky_map,parameter_variation,B_values,\
+                                                 BTS_params=None,BTS_curves=None,define_parameter_mean=False,parameter_mean=None):
+
+
+#  BTS_curves, BTS_params,\sky_map
+#                            beam_sky_training_set,N,parameter_variation,B_value_functions\
+#                             ,define_parameter_mean = False,parameter_mean = 0, print_parameter_variation = True,B_values_given=False,B_values=0):
+    """Creates a training set for the foreground multi region model
+    
+    Parameters
+    =======================================================
+    N: Number of varied foregrounds you wish to have in the training set.
+    n_regions: Number of regions in your patchy sky model
+    frequencies: The frequency range you wish to evaluate at. Defines your frequency bins.
+    spectral_index_map: Sky map representing spectral indices of some comparison frequencies.
+    sky_map: The galaxy map, rotated into your LST, that is being used for the simulated data. Shape(frequency bins, NPIX)
+    parameter_variation:  The variation in the parameters. This will be a multiplicative factor. Shoud be shape (3)
+    B_values: Array of B_values, which are the weights per region given a specific beam. Needs to be shape (number of beams in ts, freqeuncy bins,regions)
+    BTS_curves: The beam training set curves. This should already include the beams weighting the base foreground model.
+                I could make this function do that, but it often takes some time, so I think it's better to do that externally
+                in case you wanted to save it and  Should be shape (n curves,frequency bins)
+    BTS_params: The parameters associated with each beam that weighted each foreground
+    define_parameter_mean: Whether or not to define a new parameter mean. See parameter_mean below for more details.
+    parameter_mean: The mean value that the parameter_viariation values will center around. By default it is the best fit parameters.
+
+    Returns
+    =======================================================
+    training_set: Same data as the new_curves return, but in the proper shape for input into pylinex extractions
+    training_set_params: The parameters associated with the training_set curves
+    optimized_parameters: The best fit parameters to the input sky_map
+    new_curves: The new curves of the training set based on your inputs
+    new_foreground_deltaT: The change in temperature per region for each of the training set curves
+    """
+
+    if define_parameter_mean and type(parameter_mean) == None:
+        raise ValueError ("If define_parameter_mean is true, you must input a parameter mean that matches the parameter shape.")
+
+    synchrotron = synch
+    optimized_parameters = np.zeros((n_regions,3)) # three parameters in the synchrotron model: Amplitude, spectral index, spectral cuvature
+    patch=perses.models.PatchyForegroundModel(frequencies,spectral_index_map,n_regions) # define the regional patches
+    region_indices = patch.foreground_pixel_indices_by_region_dictionary
+    region_data = np.zeros((n_regions,len(frequencies)))
+    optimized_parameters = np.zeros((n_regions,3)) # three parameters in the synchrotron model: Amplitude, spectral index, spectral cuvature
+
+   
+    ## This loop will populate the temperatures of each region and fit a best fit to that region for synchrotron
+    for i,r in enumerate(region_indices): 
+        region_temps_raw = np.array([])
+        for f in range(len(sky_map)):
+            region_temps_element = sky_map[f][region_indices[r]].mean() # The index on the sky map is NOTE: Not general
+            region_temps_raw = np.append(region_temps_raw,region_temps_element)           # assumes a specific index convention (index = frequency - 1)        
+        region_temps_interp = scipy.interpolate.CubicSpline(range(1,len(sky_map)+1),region_temps_raw)
+        region_temps = region_temps_interp(frequencies)
+        region_data[i] = region_temps
+        params = scipy.optimize.curve_fit(synchrotron,frequencies,region_temps,maxfev=5000)[0]
+        optimized_parameters[i] = params
+
+
+
+    ## This loop creates the difference array that will be added to each foreground frequency
+    new_parameters = np.zeros((N,n_regions,3))
+    new_foreground_deltaT = np.zeros((N,n_regions,len(frequencies)))
+    if define_parameter_mean:
+        model_mean = parameter_mean
+    else:
+        model_mean = copy.deepcopy(optimized_parameters)
+
+    # This loop creates the difference in temperature from the base model based on the new parameters randomly generated
+    for n in tqdm(range(N)):
+            for r in range(n_regions):
+                new_parameter_element = np.array([model_mean[r][0]*(1+(parameter_variation[0] - 2*parameter_variation[0]*np.random.random()))\
+                                        ,model_mean[r][1]*(1+(parameter_variation[1] - 2*parameter_variation[1]*np.random.random()))\
+                                        ,model_mean[r][2]*(1+(parameter_variation[2] - 2*parameter_variation[2]*np.random.random()))])   
+                new_parameters[n][r] = new_parameter_element
+                new_temp = synchrotron(frequencies,new_parameter_element[0],new_parameter_element[1],new_parameter_element[2])
+                delta_temp = new_temp - synchrotron(frequencies,optimized_parameters[r][0],optimized_parameters[r][1],optimized_parameters[r][2])
+                new_foreground_deltaT[n][r] = delta_temp
+    
+
+
+    # This loop weights the new change in mean temperature per region with the beam value associated
+    weighted_deltaT = np.zeros((N,len(frequencies)))
+    new_curves = np.zeros((N,len(frequencies)))
+    index_array = np.zeros(N).astype(int)
+    for b in tqdm(range(N)):
+        random_beam_index = int(np.random.uniform(0,len(B_values)))
+        index_array[b] = random_beam_index
+        random_beam = B_values[random_beam_index]
+        for r in range(n_regions):
+            weighted_deltaT[b] += new_foreground_deltaT[b][r]*random_beam[:,r]
+
+
+
+        new_curves[b] = BTS_curves[index_array[b]]+weighted_deltaT[b]
+        parameters = BTS_params[index_array]
+
+    return new_curves,parameters, optimized_parameters, new_foreground_deltaT, BTS_curves,index_array,weighted_deltaT
+
+def synchrotron_foreground_updated(n_regions,frequencies,spectral_index_map,sky_map, BTS_curves, BTS_params,\
+                           beam_sky_training_set,N,parameter_variation,B_value_functions\
+                            ,define_parameter_mean = False,parameter_mean = 0, print_parameter_variation = True,B_values_given=False,B_values=0):
+    """Creates a training set for the foreground multi region model
+    
+    Parameters
+    =======================================================
+    n_regions: Number of regions in your patchy sky model
+    data: The actual data you are fitting to. Should be shape (frequency bins)
+    noise: The noise corresponding to each frequency bin. Should be shape (frequency bins)
+    frequencies: The frequency range you wish to evaluate at. Defines your frequency bins.
+    sky_map: The galaxy map, rotated into your LST, that is being used for the simulated data. Shape(frequency bins, NPIX)
+    BTS_curves: The beam training set curves. This should already include the beams weighting the base foreground model.
+                I could make this function do that, but it often takes some time, so I think it's better to do that externally
+                in case you wanted to save it and  Should be shape (n curves,frequency bins)
+    BTS_params: The corresponding parameters for the beam curves. Should be shape (n curves, n parameters per beam)
+    beam_sky_training_set: The set of beams in your training set (in full sky map form). This can be from the raw training set, so you don't
+                            have to create interpolated beam sky maps. This function will interpolate from this the values you need.
+                            Should be shape (n curves, frequency bins, NPIX)
+    N: Number of varied foregrounds you wish to have in the training set.
+    parameter_variation:  The variation in the parameters. This will be a multiplicative factor. Shoud be shape (3)
+    B_value_functions: Defines the set of B_value interpolators that are used to determine the B_values.
+    sky_map_training_set:  Whether or not you want sky maps for each of the varied foregrounds. Take a lot of time and data
+                           to build that many sky maps, so be wary.
+    determine_parameter_range: Whether or not to determine the parameter range based on the training set of everything except
+                               the foreground
+    define_parameter_mean: Whether or not to define a new parameter mean. See parameter_mean below for more details.
+    parameter_mean: The mean value that the parameter_viariation values will center around. By default it is the best fit parameters.
+    B_values_given: Wether to use a list of B_values instead of a function.
+    B_values: If B_values_given, then this is the array of B_values. Needs to be shape (number of beams in ts, freqeuncy bins)
+
+    Returns
+    =======================================================
+    training_set: Same data as the new_curves return, but in the proper shape for input into pylinex extractions
+    training_set_params: The parameters associated with the training_set curves
+    optimized_parameters: The best fit parameters to the input sky_map
+    new_curves: The new curves of the training set based on your inputs
+    masked_indices: The indices of the pixels of the healpy map that are associated with each region
+    new_foreground_deltaT: The change in temperature per region for each of the training set curves
+    """
+    synchrotron = synch
+    optimized_parameters = np.zeros((n_regions,3)) # three parameters in the synchrotron model: Amplitude, spectral index, spectral cuvature
+    patch=perses.models.PatchyForegroundModel(frequencies,spectral_index_map,n_regions) # define the regional patches
+    B_values = np.zeros((len(BTS_curves),len(frequencies),n_regions))
+    if B_values_given:
+        B_values = B_values
+    else:
+        for i,b in enumerate(BTS_params):
+            for f in range(len(frequencies)):
+                B_values[i][f] = B_value_functions[f](b)
+    region_indices = patch.foreground_pixel_indices_by_region_dictionary
+    region_data = np.zeros((n_regions,len(frequencies)))
+    optimized_parameters = np.zeros((n_regions,3)) # three parameters in the synchrotron model: Amplitude, spectral index, spectral cuvature
+    masked_indices = np.where(beam_sky_training_set[0][-1] == 0)[0]
+
+   
+    ## This loop will populate the temperatures of each region and fit a best fit to that region for synchrotron
+    for i,r in enumerate(region_indices): 
+        region_temps_raw = np.array([])
+        for f in range(len(sky_map)):
+            region_temps_element = sky_map[f][region_indices[r]].mean() # The index on the sky map is NOTE: Not general
+            region_temps_raw = np.append(region_temps_raw,region_temps_element)           # assumes a specific index convention (index = frequency - 1)        
+        region_temps_interp = scipy.interpolate.CubicSpline(range(1,len(sky_map)+1),region_temps_raw)
+        region_temps = region_temps_interp(frequencies)
+        region_data[i] = region_temps
+        params = scipy.optimize.curve_fit(synchrotron,frequencies,region_temps,maxfev=5000)[0]
+        optimized_parameters[i] = params
+
+
+
+    ## This loop creates the difference array that will be added to each foreground frequency
+    new_parameters = np.zeros((N,n_regions,3))
+    new_foreground_deltaT = np.zeros((N,n_regions,len(frequencies)))
+    if define_parameter_mean:
+        model_mean = parameter_mean
+    else:
+        model_mean = copy.deepcopy(optimized_parameters)
+
+    # This loop creates the difference in temperature from the base model based on the new parameters randomly generated
+    for n in tqdm(range(N)):
+            for r in range(n_regions):
+                new_parameter_element = np.array([model_mean[r][0]*(1+(parameter_variation[0] - 2*parameter_variation[0]*np.random.random()))\
+                                        ,model_mean[r][1]*(1+(parameter_variation[1] - 2*parameter_variation[1]*np.random.random()))\
+                                        ,model_mean[r][2]*(1+(parameter_variation[2] - 2*parameter_variation[2]*np.random.random()))])   
+                new_parameters[n][r] = new_parameter_element
+                new_temp = synch(frequencies,new_parameter_element[0],new_parameter_element[1],new_parameter_element[2])
+                delta_temp = new_temp - synch(frequencies,optimized_parameters[r][0],optimized_parameters[r][1],optimized_parameters[r][2])
+                new_foreground_deltaT[n][r] = delta_temp
+
+    weighted_deltaT = np.zeros((N,len(frequencies)))
+    new_curves = np.zeros((N,len(frequencies)))
+    index_array = np.zeros(N).astype(int)
+    for b in tqdm(range(N)):
+        random_beam_index = int(np.random.uniform(0,len(B_values)))
+        index_array[b] = random_beam_index
+        random_beam = B_values[random_beam_index]
+        for r in range(n_regions):
+            weighted_deltaT[b] += new_foreground_deltaT[b][r]*random_beam[:,r]
+
+
+
+        new_curves[b] = BTS_curves[index_array[b]]+weighted_deltaT[b]
+        beam_parameters = BTS_params[index_array]
+
+    foreground_parameters = new_parameters
+    parameters = np.zeros((N,n_regions*3+3)) # 3 parameters per region, +3 beam parameters
+    for n in range(N):
+        parameters[n][0:n_regions*3] = foreground_parameters[n].flatten()
+        parameters[n][n_regions*3:n_regions*3+3] = beam_parameters[n]  
+
+    return new_curves,parameters,beam_parameters,foreground_parameters, optimized_parameters,masked_indices, new_foreground_deltaT, B_values,index_array
+
+def beam_weighted_synchrotron_foreground_updated(n_regions,frequencies,reference_frequency,sky_map, beam_sky_training_set,N,\
+                                          beam_parameters,foreground_parameters,B_value_functions, STS_data,STS_params,show_parameter_ranges=True\
+                                              , define_parameter_mean=False,parameter_mean=0,Nb=0,Nf=0,B_values_given=False,B_values=0):
+
+    """Creates a training set for the foreground multi region model
+    
+    Parameters
+    =======================================================
+    n_regions: Number of regions in your patchy sky model
+    data: The actual data you are fitting to. Should be shape (frequency bins)
+    noise: The noise corresponding to each frequency bin. Should be shape (frequency bins)
+    frequencies: The frequency range you wish to evaluate at. Defines your frequency bins.
+    reference_frequency: The frequency you used to create your patchy regions
+    sky_map: The galaxy map, rotated into your LST, that is being used for the simulated data. Shape(frequency bins, NPIX)
+    beam_sky_training_set: The set of beams in your training set (in full sky map form). This can be from the raw training set, so you don't
+                            have to create interpolated beam sky maps. This function will interpolate from this the values you need.
+                            Should be shape (n curves, frequency bins, NPIX)
+    N: Number of curves you wish to have in the training set.
+    beam_parameters:  The high and low values of the beam parameters for the model. For Fatima's beams it will be of the shape (3,2)
+    foreground_parameters: The variation in the parameters. This will be a multiplicative factor. Shoud be shape (3)
+    B_value_functions: Defines the set of B_value interpolators that are used to determine the B_values.
+    STS_data: An output of the signal_training_set function. As of writing this it is the first output, so variable[0]
+                              would be the correct call if that variable was set to the output of that function. 
+    STS_params: An output of the signal_training_set function. As of writing this it is the second output, so variable[1]
+    N:  The number of curves you wish to have in this new training set
+    sky_map_training_set:  Whether or not you want sky maps for each of the varied foregrounds. Take a lot of time and data
+                           to build that many sky maps, so be wary.
+    determine_parameter_range: Whether or not to determine the parameter range based on the training set of everything except
+                               the foreground
+    define_parameter_mean: Whether or not to define a new parameter mean. See parameter_mean below for more details.
+    parameter_mean: The mean value that the parameter_viariation values will center around. By default it is the best fit parameters.
+    B_values_given: Wether to use a list of B_values instead of a function.
+    B_values: If B_values_given, then this is the array of B_values. Needs to be shape (number of beams in ts, freqeuncy bins)
+    Nb: Number of beams to use in the training set (overrides N)
+    Nf: Number of foregrounds to use in the training set (overrides N) 
+
+    Returns
+    =======================================================
+    training_set: Same data as the new_curves return, but in the proper shape for input into pylinex extractions
+    training_set_params: The parameters associated with the training_set curves
+    """
+
+    if Nb == 0:
+        # Nb = int(np.sqrt(N)) # number of beams in the training set
+        Nb = N
+    else:
+        Nb = Nb
+    exp_test=py21cmsig.expanded_training_set_no_t(STS_data,STS_params,Nb,\
+                               beam_parameters,show_parameter_ranges=show_parameter_ranges)
+    BTS_curves = exp_test[0]
+    BTS_params = exp_test[1]
+
+    if Nf == 0:
+        # Nf = int(np.sqrt(N)) # number of foregrounds in the training set
+        Nf = N
+    else:
+        Nf = Nf
+    output = synchrotron_foreground_updated(n_regions,frequencies,reference_frequency,sky_map,BTS_curves,BTS_params,\
+                                    beam_sky_training_set,Nf,foreground_parameters,B_value_functions,\
+                                        define_parameter_mean=define_parameter_mean,parameter_mean=parameter_mean,B_values_given=B_values_given,B_values=B_values)
+    return output
+
+def B_value_interp_updated(beam_sky_training_set,beam_sky_training_set_params,\
+                         frequencies,spectral_index_map,n_regions):
+    """Interpolates the beam weighting per region for the synchrotron_foreground
+    
+    Parameters
+    ============================================
+    frequencies: The array of frequencies you wish to evaluate at.
+    n_regions: The number of regions you want in your foreground model
+    spectral_index_map: Map of spectral indices that is the same resolution as your base sky model.
+    reference_frequency: The frequency of the sky map that you are using to create your regions.
+    beam_sky_training_set: The set of beams in your training set (in full sky map form). This can be from the raw training set, so you don't
+                            have to create interpolated beam sky maps. This function will interpolate from this the values you need.
+                            Should be shape (n curves, frequency bins, NPIX)
+    beam_sky_training_set_params: The parameters associated with the beam_sky_training_set. Should be shape (n curves,n parameters per curve)
+    beam_curve_training_set: This is the training set that is temperature vs frequency. You'll need this one as well. This one need not
+                            be the raw training set. Should be shape (n curves, frequency bins)
+
+    Returns
+    ============================================"""
+
+    patch=perses.models.PatchyForegroundModel(frequencies,spectral_index_map,n_regions)
+    new_region_indices = patch.foreground_pixel_indices_by_region_dictionary # gives the indices of each region
+
+    t = 0
+    B_values_raw = np.zeros((len(beam_sky_training_set),len(beam_sky_training_set[0]),len(new_region_indices)))
+    B_values = np.zeros((len(beam_sky_training_set),len(frequencies),len(new_region_indices)))
+    for n in tqdm(range(len(beam_sky_training_set))):
+        for f in range(len(beam_sky_training_set[0])):
+            for i,r in enumerate(new_region_indices):
+                B_values_raw[n][f][i]=np.sum(beam_sky_training_set[n][f][new_region_indices[r]])
+        B_values_interp = scipy.interpolate.CubicSpline(np.arange(1,len(beam_sky_training_set[0])+1),B_values_raw[n])
+        B_values[n] = B_values_interp(frequencies)
+    expanded_B_values_interpolator = {}
+    for f in range(len(frequencies)):
+        values = B_values[:,f]
+        params = beam_sky_training_set_params
+        expanded_B_values_interp=scipy.interpolate.NearestNDInterpolator(params,values)
+        expanded_B_values_interpolator[f]=expanded_B_values_interp
+
+    return expanded_B_values_interpolator
+
+def plot_extraction_array (frequency_array,signal,noise,extractions_array,systematics_array,title="",ylim=None):
+    """Plots the cumulative extractions of the extraction_array
+    
+    Parameters
+    =========================================================
+    frequency_array: The array that matches the extractions
+    signal: The signal that matches the input for the extractions
+    noise: The noise function of the extractions
+
+
+    Returns
+    ========================================================
+    just plots"""
+    plt.figure(figsize=(10, 5))
+    plt.plot(frequency_array,signal,color='black',ls="--",label="input signal")
+    plt.fill_between(frequency_array,signal+noise,signal-\
+                            noise,alpha=0.25,label="radiometer noise",color="red")
+
+    mean_rms_array = np.zeros((N))
+    mean_rms_array_sys = np.zeros((N))
+    mean = extractions_array.mean(axis=0)
+    mean_sys = systematics_array.mean(axis=0)
+    sig1_index = int(0.68*N)
+    sig2_index = int(0.954*N)
+    sig3_index = int(0.997*N)
+    for n in range(N):
+        mean_rms_array[n]=((extractions_array[n]-mean)**2).mean()**(1/2)
+    sorted = np.sort(mean_rms_array)
+    mean = extractions_array[np.where(mean_rms_array == sorted[0])][0]
+    sigma1 = extractions_array[np.where(mean_rms_array == sorted[sig1_index])][0]
+    sig1_diff = np.abs(sigma1-mean)
+    sigma2 = extractions_array[np.where(mean_rms_array == sorted[sig2_index])][0]
+    sig2_diff = np.abs(sigma2-mean)
+    sigma3 = extractions_array[np.where(mean_rms_array == sorted[sig3_index])][0]
+    sig3_diff = np.abs(sigma3-mean)
+    for n in range(N):
+        mean_rms_array_sys[n]=((systematics_array[n]-mean_sys)**2).mean()**(1/2)
+    sorted_sys = np.sort(mean_rms_array_sys)
+    mean_sys = systematics_array[np.where(mean_rms_array_sys == sorted_sys[0])][0]
+    
+    plt.plot(frequency_array,mean,color="blue",alpha=0.5,label="mean extraction")
+    plt.fill_between(frequency_array,mean-sig3_diff,mean+sig3_diff,alpha=0.25,label="3 sigma extraction",color="gray")
+    plt.fill_between(frequency_array,mean-sig2_diff,mean+sig2_diff,alpha=0.25,label="2 sigma extraction",color="cyan")
+    plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
+
+
+            
+    plt.xticks(ticks=np.arange(5,51,1),minor=True)
+    plt.xticks(size=20)
+    plt.xlabel("Frequency [MHz]",fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.ylabel(r"$\delta T_b$ [K]",fontsize=15)
+    plt.title(title+f" {N} Extractions", fontsize=20)
+    plt.ylim(ylim)
+    plt.grid()
+    plt.legend()
