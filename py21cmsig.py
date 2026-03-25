@@ -476,7 +476,7 @@ def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
     Tk_array = np.array([z,T])   
     return Tk_array, Tk_function,xe_function, xe_array
 
-def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0):
+def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0, verbose=True):
     """"Creates a training set of singal curves based on the parameter range of the dark matter self-annihilation model.
     
     Parameters
@@ -486,6 +486,8 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
                 If not Gaussian, then each row is a parameter and each column represents a value of that parameter that will be included
                 in the interpolation to get new parameters. I don't linearly sample this because it usually weights the distribution
                 heavily towards one end of the parameter space. Better to interpolate and space out the curves equally.
+                NOTE: In order to get this to work with pylinex, i had to add a dummy variable. So now you have to have a shape of 
+                (number of curves, 2), but the second parameter per row can be anything. Doesn't matter.
     N: The number of curves you would like to have in your training set. Interger
     gaussian: See parameters description. Defaults to False
     B: Density parameter for baryons. Only here because dTb needs it for optical depth. Defaults to global omB0 value.
@@ -495,35 +497,49 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
     ====================================================
     training_set: An array with your desired number of varied 21 cm curves
     training_set_params: Parameters associated with each curve"""
+    derp = parameters[0][1]
     redshift_array=np.arange(20,1100,0.01)
     training_set_rs = np.ones((N,len(redshift_array)))    # dummy array for the expanded training set in redshift
     training_set = np.ones((N,len(frequency_array)))      # dummy array for the expanded training set in frequency
     training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
     
     # This creates an interpolator that can sample the parameters in a more equal way than a linear randomization.
-    parameter_interpolators = {}
-    for p in range(len(parameters)):
-        x = range(len(parameters[p]))
-        y = parameters[p]
-        parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
-        parameter_interpolators[p] = parameter_interpolator
+    if N == 1:
+        pass
+    else:
+        parameter_interpolators = {}
+        for p in range(len(parameters)):
+            x = range(len(parameters[p]))
+            y = parameters[p]
+            parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
+            parameter_interpolators[p] = parameter_interpolator
     
-    for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
-        new_params = np.array([])
-        if gaussian:
-            for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
-            training_set_params[n] = new_params
-        else:
-            for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
-            training_set_params[n] = new_params
+    if N == 1:
+        training_set_params = parameters
+    else:
+        for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
+            new_params = np.array([])
+            if gaussian:
+                for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+                    new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
+                training_set_params[n] = new_params
+            else:
+                for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+                    new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
+                training_set_params[n] = new_params
 
-    for n in tqdm(range(N)):
-        fDMAN=training_set_params[n]
-        DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
-        dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
-        training_set_rs[n] = dTb_element
+    if verbose:
+        for n in tqdm(range(N)):
+            fDMAN=training_set_params[n][0]
+            DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
+            training_set_rs[n] = dTb_element
+    else:
+        for n in range(N):
+            fDMAN=training_set_params[n][0]
+            DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
+            training_set_rs[n] = dTb_element
     # Now we need to interpolate back to frequency
     redshift_array_mod = 1420.4/frequency_array-1   
     for n in range(N):
@@ -747,7 +763,7 @@ def Tk_cool_simp (z_array,C):
     Tk_function=scipy.interpolate.CubicSpline(t[::-1],T[::-1])  # Turns our output into a function with redshift as an argument    
     return Tk_array, Tk_function, TX_array
 
-def MCDM_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0):
+def MCDM_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0,verbose=True):
     """"Creates a training set of singal curves based on the parameter range of the dark matter decay model.
     
     Parameters
@@ -764,36 +780,49 @@ def MCDM_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
     ====================================================
     training_set: An array with your desired number of varied 21 cm curves
     training_set_params: Parameters associated with each curve."""
-    
+    derp = parameters[0][1]
     redshift_array=np.arange(20,1100,0.01)
     training_set_rs = np.ones((N,len(redshift_array)))    # dummy array for the expanded training set in redshift
     training_set = np.ones((N,len(frequency_array)))      # dummy array for the expanded training set in frequency
     training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
 
      # This creates an interpolator that can sample the parameters in a more equal way than a linear randomization.
-    parameter_interpolators = {}
-    for p in range(len(parameters)):
-        x = range(len(parameters[p]))
-        y = parameters[p]
-        parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
-        parameter_interpolators[p] = parameter_interpolator
+    if N == 1:
+        pass
+    else:
+        parameter_interpolators = {}
+        for p in range(len(parameters)):
+            x = range(len(parameters[p]))
+            y = parameters[p]
+            parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
+            parameter_interpolators[p] = parameter_interpolator
     
-    for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
-        new_params = np.array([])
-        if gaussian:
-            for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
-            training_set_params[n] = new_params
-        else:
-            for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
-            training_set_params[n] = new_params
+    if N == 1:
+        training_set_params = parameters
+    else:
+        for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
+            new_params = np.array([])
+            if gaussian:
+                for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+                    new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
+                training_set_params[n] = new_params
+            else:
+                for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+                    new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
+                training_set_params[n] = new_params
 
-    for n in tqdm(range(N)):
-        MCDM_C=training_set_params[n][0]
-        MCDM_Tk = Tk_cool_simp(redshift_array,MCDM_C)  # calculate our kinetic temperature to plug into the dTb function
-        dTb_element=dTb(redshift_array,camb_xe_interp,MCDM_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
-        training_set_rs[n] = dTb_element
+    if verbose:
+        for n in tqdm(range(N)):
+            MCDM_C=training_set_params[n][0]
+            MCDM_Tk = Tk_cool_simp(redshift_array,MCDM_C)  # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(redshift_array,camb_xe_interp,MCDM_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
+            training_set_rs[n] = dTb_element
+    else:
+        for n in range(N):
+            MCDM_C=training_set_params[n][0]
+            MCDM_Tk = Tk_cool_simp(redshift_array,MCDM_C)  # calculate our kinetic temperature to plug into the dTb function
+            dTb_element=dTb(redshift_array,camb_xe_interp,MCDM_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
+            training_set_rs[n] = dTb_element
     # Now we need to interpolate back to frequency
     redshift_array_mod = 1420.4/frequency_array-1   
     for n in range(N):
@@ -975,7 +1004,7 @@ def ERB_model (z_array,A_r_value,frequency,starting_point,smoothing,T_k=My_Tk[1]
     ERB_function = scipy.interpolate.CubicSpline(z_array,dTb(z_array,x_e,T_k))
     return ERB_function
 
-def ERB_training_set(frequency_array,parameters,N,T_k=My_Tk[1],x_e=camb_xe_interp,gaussian=False,B = omB0, M=omM0):
+def ERB_training_set(frequency_array,parameters,N,T_k=My_Tk[1],x_e=camb_xe_interp,gaussian=False,B = omB0, M=omM0,verbose=True):
     """"Creates a training set of singal curves based on the parameter range of the excess radio background model.
     
     Parameters
@@ -999,30 +1028,43 @@ def ERB_training_set(frequency_array,parameters,N,T_k=My_Tk[1],x_e=camb_xe_inter
     training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
 
      # This creates an interpolator that can sample the parameters in a more equal way than a linear randomization.
-    parameter_interpolators = {}
-    for p in range(len(parameters)):
-        x = range(len(parameters[p]))
-        y = parameters[p]
-        parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
-        parameter_interpolators[p] = parameter_interpolator
+    if N==1:
+        pass
+    else:
+        parameter_interpolators = {}
+        for p in range(len(parameters)):
+            x = range(len(parameters[p]))
+            y = parameters[p]
+            parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
+            parameter_interpolators[p] = parameter_interpolator
     
-    for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
-        new_params = np.array([])
-        if gaussian:
-            for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
-            training_set_params[n] = new_params
-        else:
-            for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
-            training_set_params[n] = new_params
+    if N==1:
+        training_set_params = parameters
+    else:
+        for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
+            new_params = np.array([])
+            if gaussian:
+                for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+                    new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
+                training_set_params[n] = new_params
+            else:
+                for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+                    new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
+                training_set_params[n] = new_params
 
-    for n in tqdm(range(N)):
-        z_s,Ar=training_set_params[n]
-        ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k)  # calculates the ERB model
-        ERB_element=ERB_function(redshift_array)  # Need to convert back to Kelvin
-        training_set_rs[n] = ERB_element
-    # Now we need to interpolate back to frequency
+    if verbose:
+        for n in tqdm(range(N)):
+            z_s,Ar=training_set_params[n]
+            ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k)  # calculates the ERB model
+            ERB_element=ERB_function(redshift_array)  # Need to convert back to Kelvin
+            training_set_rs[n] = ERB_element
+    else:
+        for n in tqdm(range(N)):
+            z_s,Ar=training_set_params[n]
+            ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k)  # calculates the ERB model
+            ERB_element=ERB_function(redshift_array)  # Need to convert back to Kelvin
+            training_set_rs[n] = ERB_element
+        # Now we need to interpolate back to frequency
     redshift_array_mod = 1420.4/frequency_array-1   
     for n in range(N):
         interpolator = scipy.interpolate.CubicSpline(redshift_array,training_set_rs[n])
@@ -1155,20 +1197,24 @@ This will likely make your plot look odd at frequencies larger than around 1.5 M
     training_set = np.ones((N,len(new_redshift_array)))    # dummy array for the expanded training set
     training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
     x_e = camb_xe_interp
-    if parameters[1][0] == 0:
-        power_mbh_low = np.log10(parameters[0][0])
-        power_mbh_high = np.log10(parameters[0][1])
-        random_power_mbh = np.random.uniform(power_mbh_low,power_mbh_high,N)
-        training_set_params[:,0] = 10**random_power_mbh
-        power_obh0_func = lambda power_m_bh: 3*power_m_bh-52
-        power_obh0_high=power_obh0_func(random_power_mbh)
-        power_obh0_low = -9
-        random_power_obh0 = np.random.uniform(power_obh0_low,power_obh0_high,N)
-        training_set_params[:,1] = 10**random_power_obh0
 
+    if N ==1:
+        training_set_params = parameters
     else:
-        training_set_params[:,0] = np.random.uniform(parameters[0][0],parameters[0][1],N)
-        training_set_params[:,1] = np.random.uniform(parameters[1][0],parameters[1][1],N)        
+        if parameters[1][0] == 0:
+            power_mbh_low = np.log10(parameters[0][0])
+            power_mbh_high = np.log10(parameters[0][1])
+            random_power_mbh = np.random.uniform(power_mbh_low,power_mbh_high,N)
+            training_set_params[:,0] = 10**random_power_mbh
+            power_obh0_func = lambda power_m_bh: 3*power_m_bh-52
+            power_obh0_high=power_obh0_func(random_power_mbh)
+            power_obh0_low = -9
+            random_power_obh0 = np.random.uniform(power_obh0_low,power_obh0_high,N)
+            training_set_params[:,1] = 10**random_power_obh0
+
+        else:
+            training_set_params[:,0] = np.random.uniform(parameters[0][0],parameters[0][1],N)
+            training_set_params[:,1] = np.random.uniform(parameters[1][0],parameters[1][1],N)        
 
 
     if verbose:
@@ -1316,20 +1362,22 @@ This will likely make your plot look odd at frequencies larger than around 1.5 M
     training_set = np.ones((N,len(new_redshift_array)))    # dummy array for the expanded training set
     training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
     x_e = camb_xe_interp
-    # if parameters[1][0] == 0:
-    #     power_mbh_low = np.log10(parameters[0][0])
-    #     power_mbh_high = np.log10(parameters[0][1])
-    #     random_power_mbh = np.random.uniform(power_mbh_low,power_mbh_high,N)
-    #     training_set_params[:,0] = 10**random_power_mbh
-    #     power_obh0_func = lambda power_m_bh: 3*power_m_bh-52
-    #     power_obh0_high=power_obh0_func(random_power_mbh)
-    #     power_obh0_low = -9
-    #     random_power_obh0 = np.random.uniform(power_obh0_low,power_obh0_high,N)
-    #     training_set_params[:,1] = 10**random_power_obh0
-
-    # else:
-    training_set_params[:,0] = np.random.uniform(parameters[0][0],parameters[0][1],N)
-    training_set_params[:,1] = np.random.uniform(parameters[1][0],parameters[1][1],N)        
+    if N == 1:
+            training_set_params = parameters
+    else:
+        if parameters[1][0] == 0:
+            power_mbh_low = np.log10(parameters[0][0])
+            power_mbh_high = np.log10(parameters[0][1])
+            random_power_mbh = np.random.uniform(power_mbh_low,power_mbh_high,N)
+            training_set_params[:,0] = 10**random_power_mbh
+            power_obh0_func = lambda power_m_bh: 3*power_m_bh-52
+            power_obh0_high=power_obh0_func(random_power_mbh)
+            power_obh0_low = -9
+            random_power_obh0 = np.random.uniform(power_obh0_low,power_obh0_high,N)
+            training_set_params[:,1] = 10**random_power_obh0
+        else:
+            training_set_params[:,0] = np.random.uniform(parameters[0][0],parameters[0][1],N)
+            training_set_params[:,1] = np.random.uniform(parameters[1][0],parameters[1][1],N)        
 
 
     if verbose:
