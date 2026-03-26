@@ -396,8 +396,7 @@ def lambdaCDM_training_set(frequency_array,parameters,N,verbose=True):
     return training_set, training_set_params, n_b0, p_crit
 
 # This is our custom T_k code with Dark Matter Self-Annihilation
-
-def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
+def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0,C_Tk=5.5,C_dxe=0.25):
     """Creates an array evolving the IGM temperature based on adiabatic cooling, compton scattering, and dark matter sefl-annihilation. Only works for the cosmic 
     Dark Ages, as it does not include UV.
     
@@ -428,8 +427,10 @@ def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
     # This defines our right hand side function
     delta_z = np.abs(z_array[1]-z_array[0])
     standard_dxe_dz = scipy.interpolate.CubicSpline(z_array,np.gradient(old_x_e(z_array))*(1/delta_z)) # standard electron fraction model based on camb
-    annihilation_dxe_dz = lambda z,xe: (0.0735*f_dman_e_0*((1-xe)/3)*(1+(z))**2*1/(1+f_He)*1/H(z,omR0,omM0,omK0,omL0)*1/(1-xe))*0.03  # self-annihilation addition to the rate of change very non physical right now
-    func_xe = lambda z,xe: standard_dxe_dz(z)-(1/2*scipy.special.erf(0.01*(z-900))+1/2)*annihilation_dxe_dz(z,xe)  # total rate of change of free electrons
+    annihilation_dxe_dz = lambda z,xe: 0.0735*f_dman_e_0*1/((1-xe)*(1+f_He))*(1-xe)/3*(1+z)**2*1/H(z,omR0,omM0,omK0,omL0,H0)
+      # self-annihilation addition to the rate of change very non physical right now
+    # annihilation_dxe_dz = lambda z,xe : 0.0735*(1+z)**2*f_dman_e_0*1/(H(z,omR0,omM0,omK0,omL0,H0)*(1+f_He))+xe*0
+    func_xe = lambda z,xe: standard_dxe_dz(z)-annihilation_dxe_dz(z,xe)*C_dxe # total rate of change of free electrons
 
     # Initial conditions
     xe_0 = np.array([old_x_e(z_array[-1])])    # sets our initial condition at our starting redshift (usually 1100 for dark age stuff)
@@ -455,15 +456,15 @@ def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
 ### Let's code up T_k
     ## The heating / cooling processes ##
     
-    adiabatic = lambda zs,T:(1/(H(zs,omR0,omM0,omK0,omL0)*(1+zs)))*(2*H(zs,omR0,omM0,omK0,omL0)*T)
-    compton = lambda zs,T: (1/(H(zs,omR0,omM0,omK0,omL0)*(1+zs)))*((x_e(zs))/(1+f_He+x_e(zs)))*((T_gamma(zs)-T)/(t_c(zs)))
-    dman = lambda zs,T,f_dman_e_0,g_h: (2/3)*(1/(H(zs,omR0,omM0,omK0,omL0)*kb_ev))*f_dman_e_0*g_h(zs)*1/(1+f_He+x_e(zs))*(1+zs)**2*0.3     # dark matter self-annihilation
+    adiabatic = lambda zs,T:(1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*(2*H(zs,omR0,omM0,omK0,omL0,H0)*T)
+    compton = lambda zs,T: (1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*((x_e(zs))/(1+f_He+x_e(zs)))*((T_gamma(zs)-T)/(t_c(zs)))
+    dman = lambda zs,T: (2/3)*(1.6e-12/(H(zs,omR0,omM0,omK0,omL0,H0)*kb))*f_dman_e_0*g_h(zs)*n_H(zs,x_e)/n_tot(zs)*(1+zs)**2     # dark matter self-annihilation
 
 
     T0 = np.array([T_gamma(z_array[-1])])   # your initial temperature at the highest redshift. This assumes it is coupled fully to the CMB at that time.
     z0 = z_array[-1]    # defines your starting z (useful for the loop below)
     z_span = (z_start,z_end)
-    func = lambda z,T: adiabatic(z,T) - compton(z,T) - dman(z,T,f_dman_e_0,g_h)
+    func = lambda z,T: adiabatic(z,T) - compton(z,T) - dman(z,T)*C_Tk
 
     # Solve the differential equation
     sol = solve_ivp(func, z_span, T0, dense_output=True, method='Radau')
@@ -474,9 +475,9 @@ def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
 
     Tk_function=scipy.interpolate.CubicSpline(z[::-1],T[::-1])  # Turns our output into a function with redshift as an argument  
     Tk_array = np.array([z,T])   
-    return Tk_array, Tk_function,xe_function, xe_array
+    return Tk_array, Tk_function,xe_function, xe_array,xe_0
 
-def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0, verbose=True):
+def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0,C_Tk=5.5,C_dxe=0.25,verbose=True):
     """"Creates a training set of singal curves based on the parameter range of the dark matter self-annihilation model.
     
     Parameters
@@ -486,8 +487,6 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
                 If not Gaussian, then each row is a parameter and each column represents a value of that parameter that will be included
                 in the interpolation to get new parameters. I don't linearly sample this because it usually weights the distribution
                 heavily towards one end of the parameter space. Better to interpolate and space out the curves equally.
-                NOTE: In order to get this to work with pylinex, i had to add a dummy variable. So now you have to have a shape of 
-                (number of curves, 2), but the second parameter per row can be anything. Doesn't matter.
     N: The number of curves you would like to have in your training set. Interger
     gaussian: See parameters description. Defaults to False
     B: Density parameter for baryons. Only here because dTb needs it for optical depth. Defaults to global omB0 value.
@@ -501,7 +500,10 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
     redshift_array=np.arange(20,1100,0.01)
     training_set_rs = np.ones((N,len(redshift_array)))    # dummy array for the expanded training set in redshift
     training_set = np.ones((N,len(frequency_array)))      # dummy array for the expanded training set in frequency
-    training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
+    if N == 1:
+        pass
+    else:
+        training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
     
     # This creates an interpolator that can sample the parameters in a more equal way than a linear randomization.
     if N == 1:
@@ -513,10 +515,7 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
             y = parameters[p]
             parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
             parameter_interpolators[p] = parameter_interpolator
-    
-    if N == 1:
-        training_set_params = parameters
-    else:
+        
         for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
             new_params = np.array([])
             if gaussian:
@@ -525,19 +524,20 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
                 training_set_params[n] = new_params
             else:
                 for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-                    new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*5))
+                    new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*(len(parameters[k])-1)))
                 training_set_params[n] = new_params
-
+    if N == 1:
+        training_set_params = parameters
     if verbose:
         for n in tqdm(range(N)):
             fDMAN=training_set_params[n][0]
-            DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
+            DMAN_Tk = Tk_DMAN(redshift_array,fDMAN,C_Tk=C_Tk,C_dxe=C_dxe)  # calculate our kinetic temperature to plug into the dTb function
             dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
             training_set_rs[n] = dTb_element
     else:
         for n in range(N):
             fDMAN=training_set_params[n][0]
-            DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
+            DMAN_Tk = Tk_DMAN(redshift_array,fDMAN,C_Tk=C_Tk,C_dxe=C_dxe)  # calculate our kinetic temperature to plug into the dTb function
             dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
             training_set_rs[n] = dTb_element
     # Now we need to interpolate back to frequency
@@ -547,6 +547,156 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
         training_set[n] = interpolator(redshift_array_mod)
     
     return training_set, training_set_params
+# def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
+#     """Creates an array evolving the IGM temperature based on adiabatic cooling, compton scattering, and dark matter sefl-annihilation. Only works for the cosmic 
+#     Dark Ages, as it does not include UV.
+    
+#     ===================================================================
+#     Parameters
+#     ===================================================================
+#     z_array: an array of increasing redshift values. Needs to be a sufficiently fine grid. 
+#     As of now there is some considerable numerical instabilities when your z grid is > 0.01
+
+#     f_dman_e_0: Parameter governing the effects of this exotic model.
+
+#     ===================================================================
+#     Output
+#     ===================================================================
+#     Tk_array:  A 2-D array with each entry being the redshift and IGM temperature
+#     Tk_function: Interpolated version of your Tk_array that acts like a function with
+#     redshift for its argument. Useful for future calculations.
+#     xe_function: Interpolation function for the fraction of free electrons
+#     xe_array: Array created from the x_e function."""
+
+#     num=len(z_array)
+#     t_c = lambda z: 1.172e8*((1+z)/10)**(-4) * 3.154e7 #[seconds] timescale of compton scattering
+#     old_x_e = camb_xe_interp   # this is our model for fraction of free electrons
+#     Tk_array = np.ones((num-1,2))   # creates a blank array for use below
+#     z_start = z_array[-1]
+#     z_end = z_array[0]
+
+#     # This defines our right hand side function
+#     delta_z = np.abs(z_array[1]-z_array[0])
+#     standard_dxe_dz = scipy.interpolate.CubicSpline(z_array,np.gradient(old_x_e(z_array))*(1/delta_z)) # standard electron fraction model based on camb
+#     annihilation_dxe_dz = lambda z,xe: (0.0735*f_dman_e_0*((1-xe)/3)*(1+(z))**2*1/(1+f_He)*1/H(z,omR0,omM0,omK0,omL0)*1/(1-xe))*0.03  # self-annihilation addition to the rate of change very non physical right now
+#     func_xe = lambda z,xe: standard_dxe_dz(z)-(1/2*scipy.special.erf(0.01*(z-900))+1/2)*annihilation_dxe_dz(z,xe)  # total rate of change of free electrons
+
+#     # Initial conditions
+#     xe_0 = np.array([old_x_e(z_array[-1])])    # sets our initial condition at our starting redshift (usually 1100 for dark age stuff)
+
+#     # Time span
+#     z_span = (z_start, z_end)
+
+#     # Solve the differential equation
+#     sol = solve_ivp(func_xe, z_span, xe_0, dense_output=True, method='Radau')
+
+#     # Access the solution
+#     z = sol.t
+#     xe = sol.y[0]
+
+    
+#     xe_function=scipy.interpolate.CubicSpline(z[::-1],xe[::-1])
+#     x_e = xe_function
+#     xe_array = np.array([z,xe])
+         
+#     g_h = lambda z: (1+2*x_e(z))/3
+
+
+# ### Let's code up T_k
+#     ## The heating / cooling processes ##
+    
+#     adiabatic = lambda zs,T:(1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*(2*H(zs,omR0,omM0,omK0,omL0,H0)*T)
+#     compton = lambda zs,T: (1/(H(zs,omR0,omM0,omK0,omL0,H0)*(1+zs)))*((x_e(zs))/(1+f_He+x_e(zs)))*((T_gamma(zs)-T)/(t_c(zs)))
+#     dman = lambda zs,T,f_dman_e_0,g_h: (2/3)*(1/(H(zs,omR0,omM0,omK0,omL0,H0)*kb_ev))*f_dman_e_0*g_h(zs)*1/(1+f_He+x_e(zs))*(1+zs)**2*0.3     # dark matter self-annihilation
+
+
+#     T0 = np.array([T_gamma(z_array[-1])])   # your initial temperature at the highest redshift. This assumes it is coupled fully to the CMB at that time.
+#     z0 = z_array[-1]    # defines your starting z (useful for the loop below)
+#     z_span = (z_start,z_end)
+#     func = lambda z,T: adiabatic(z,T) - compton(z,T) - dman(z,T,f_dman_e_0,g_h)
+
+#     # Solve the differential equation
+#     sol = solve_ivp(func, z_span, T0, dense_output=True, method='Radau')
+
+#     # Access the solution
+#     z = sol.t
+#     T = sol.y[0]
+
+#     Tk_function=scipy.interpolate.CubicSpline(z[::-1],T[::-1])  # Turns our output into a function with redshift as an argument  
+#     Tk_array = np.array([z,T])   
+#     return Tk_array, Tk_function,xe_function, xe_array
+
+# def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0, verbose=True):
+#     """"Creates a training set of singal curves based on the parameter range of the dark matter self-annihilation model.
+    
+#     Parameters
+#     ===================================================
+#     frequency_array: array of frequencies to calculate the curve at. array-like.
+#     parameters: Set of mean values and standard deviation of your parameters if gaussian. If Gaussian, first column is mean, second column is standard deviation
+#                 If not Gaussian, then each row is a parameter and each column represents a value of that parameter that will be included
+#                 in the interpolation to get new parameters. I don't linearly sample this because it usually weights the distribution
+#                 heavily towards one end of the parameter space. Better to interpolate and space out the curves equally.
+#                 NOTE: In order to get this to work with pylinex, i had to add a dummy variable. So now you have to have a shape of 
+#                 (number of curves, 2), but the second parameter per row can be anything. Doesn't matter.
+#     N: The number of curves you would like to have in your training set. Interger
+#     gaussian: See parameters description. Defaults to False
+#     B: Density parameter for baryons. Only here because dTb needs it for optical depth. Defaults to global omB0 value.
+#     M: Density parameter for matter. Only here because dTb needs it for optical depth. Defaults to global omM0 value.
+    
+#     Returns
+#     ====================================================
+#     training_set: An array with your desired number of varied 21 cm curves
+#     training_set_params: Parameters associated with each curve"""
+#     derp = parameters[0][1]
+#     redshift_array=np.arange(20,1100,0.01)
+#     training_set_rs = np.ones((N,len(redshift_array)))    # dummy array for the expanded training set in redshift
+#     training_set = np.ones((N,len(frequency_array)))      # dummy array for the expanded training set in frequency
+#     training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
+    
+#     # This creates an interpolator that can sample the parameters in a more equal way than a linear randomization.
+#     if N == 1:
+#         pass
+#     else:
+#         parameter_interpolators = {}
+#         for p in range(len(parameters)):
+#             x = range(len(parameters[p]))
+#             y = parameters[p]
+#             parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
+#             parameter_interpolators[p] = parameter_interpolator
+    
+#     if N == 1:
+#         training_set_params = parameters
+#     else:
+#         for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
+#             new_params = np.array([])
+#             if gaussian:
+#                 for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+#                     new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
+#                 training_set_params[n] = new_params
+#             else:
+#                 for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
+#                     new_params = np.append(new_params,parameter_interpolators[k](np.random.random()*len(parameters)))
+#                 training_set_params[n] = new_params
+
+#     if verbose:
+#         for n in tqdm(range(N)):
+#             fDMAN=training_set_params[n][0]
+#             DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
+#             dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
+#             training_set_rs[n] = dTb_element
+#     else:
+#         for n in range(N):
+#             fDMAN=training_set_params[n][0]
+#             DMAN_Tk = Tk_DMAN(redshift_array,fDMAN)  # calculate our kinetic temperature to plug into the dTb function
+#             dTb_element=dTb(redshift_array,DMAN_Tk[2],DMAN_Tk[1],B,M)*1e-3  # Need to convert back to Kelvin
+#             training_set_rs[n] = dTb_element
+#     # Now we need to interpolate back to frequency
+#     redshift_array_mod = 1420.4/frequency_array-1   
+#     for n in range(N):
+#         interpolator = scipy.interpolate.CubicSpline(redshift_array,training_set_rs[n])
+#         training_set[n] = interpolator(redshift_array_mod)
+    
+#     return training_set, training_set_params
 
 def Tk_DMD (z_array,time_scale,C,omC0=omC0,h=h,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0):
     """Creates an array evolving the IGM temperature based on adiabatic cooling, compton scattering, and dark matter sefl-annihilation. Only works for the cosmic 
@@ -2310,7 +2460,7 @@ def gaussian_beams(frequencies,std,resolution=NSIDE,monochromatic_mode = False, 
     return beams
 
 def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,signal,frequency_array,IC="DIC",verbose=True,plot=True,plot_residual=False,num_basis_vectors=100,num_sys_vectors = 50, \
-                       num_sig_vectors = 10, title = "Pylinex Extraction", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,multi_spectra=False,priors=False):
+                       num_sig_vectors = 10, title = "Pylinex Extraction", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,multi_spectra=False,priors=False,covariance_expansion_factor=1):
      """Streamlines the pylinex extraction and inputs. Note that this only accepts a one (any single component fit) or two component data set as of now 
      (systematics and signal).
     
@@ -2340,6 +2490,7 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
      title: Title to the plot.
      multi_spectra: Option to use multiple spectra. This must be set to  True if you are trying to correlate multiple spectra at once (such as multiple LSTs).
     priors: Option to use gaussian priors for the signal
+    covariance_expansion_factor: The number of sigma to expand out to for your priors. Essentially just relaxes your priors if you find them too strict.
        
     Returns
     =================================================
@@ -2356,6 +2507,7 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
         temperatures = data  # sets the data to fit to.
         systematics_basis = TrainedBasis(training_set=systematics_training_set,num_basis_vectors=num_basis_vectors,error=noise)    # creates the SVD basis from the training set
         signal_basis = TrainedBasis(training_set=signal_training_set,num_basis_vectors=num_basis_vectors,error=noise)
+        signal_basis.generate_gaussian_prior(covariance_expansion_factor=covariance_expansion_factor)
         basis_sum = BasisSum(["systematics","signal"],[systematics_basis, signal_basis])                    # sums the two components together (acts as placeholder for one component fit)
         quantity = AttributeQuantity(IC)   
         if priors:
@@ -2400,6 +2552,7 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
         names = ["signal","systematics"]        # names of your bases
         bases = [TrainedBasis(training_set=signal_training_set,num_basis_vectors=num_basis_vectors,error=noise_level_flat, expander = RepeatExpander(Ns)),\
                  TrainedBasis(training_set=flattened_systematics_training_set,num_basis_vectors=num_basis_vectors,error=noise_level_flat, expander=NullExpander())]     # creates the correlated spectrum bases
+        bases[0].generate_gaussian_prior(covariance_expansion_factor=covariance_expansion_factor)
         if priors:
             priors = {"signal_prior" : bases[0].gaussian_prior}
         basis_sum = BasisSum(names,bases)                    # sums the two components together (acts as placeholder for one component fit)
@@ -2523,7 +2676,7 @@ def training_set_test(training_set,noise,num_divisions=10,num_basis_vectors=100,
 def extraction_statistics(N,systematics_training_set,signal_training_set,data,noise,signal,systematics,frequency_array,IC="DIC",verbose=True,plot=True,num_basis_vectors=100,num_sys_vectors = 50, \
                        num_sig_vectors = 10, title = "CDF ", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,display_type = "CDF", test_mode = "random noise",num_divisions=10\
                         ,N_antenna=N_antenna,dnu=dnu,dt=dt,save_path = "",use_fit_noise=False,xlim=None,training_set_to_test = "systematics",restrict_runs=0, multi_spectra = False,priors=False,\
-                            sigma_plot = 3,vertical_lines=None):
+                            sigma_plot = 3,vertical_lines=None,covariance_expansion_factor=1):
     """Evaluates a set of statistics based on input systematics and signal vs extraction. This requires you to know the foreground and signal
     inputs. It is designed to be a test of the pipeline, not a test of the data.
     
@@ -2578,6 +2731,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
     multi_spectra: Wether the function uses multiple correlated spectra.
     priors: Option to use gaussian priors for the signal
     sigma_plot: How many sigmas to plot in the cumulative extraction. Defaults to 3 sigma.
+    covariance_expansion_factor: The number of sigma to expand out to for your priors. Essentially just relaxes your priors if you find them too strict.
                           
     Returns
     =============================================
@@ -2606,6 +2760,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
     signal_terms_used = np.zeros((N))
     chi_squared_array = np.zeros((N))
     psi_squared_array = np.zeros((N))
+    random_signal_index_array = np.zeros((N))
     if test_mode == "training set size":
         print(f"Number of curves in each training set chunk is {len(systematics_training_set)/N} for this evaluation")
     if restrict_runs == 0:
@@ -2616,7 +2771,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         if (test_mode == "random noise") & (multi_spectra == False):
             sim_data = py21cmsig.simulation_run(systematics,signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2645,7 +2800,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         if (test_mode == "random noise") & (multi_spectra == True):
             sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2672,10 +2827,12 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 plt.title(f"{title} {N} Extractions", fontsize=20)
 
         if (test_mode == "goodness of fit") & (multi_spectra == False):
-            random_signal = signal_training_set[int(np.random.uniform(0,len(signal_training_set)))]
+            random_index = int(np.random.uniform(0,len(signal_training_set)))
+            random_signal = signal_training_set[random_index]
+            random_signal_index_array[n] = random_index
             sim_data = py21cmsig.simulation_run(systematics,random_signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2702,10 +2859,12 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 plt.title(f"{title} {N} Extractions", fontsize=20)
 
         if (test_mode == "goodness of fit") & (multi_spectra == True):
-            random_signal = signal_training_set[int(np.random.uniform(0,len(signal_training_set)))]
+            random_index = int(np.random.uniform(0,len(signal_training_set)))
+            random_signal = signal_training_set[random_index]
+            random_signal_index_array[n] = random_index
             sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,random_signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2740,7 +2899,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 # num_divisions = int(len(systematics_training_set)/N)
                 chunk = systematics_training_set[n::N]
                 extraction = py21cmsig.pylinex_extraction(chunk,signal,data,noise,signal,frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
                 if use_fit_noise:
                     systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics)/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
                     signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
@@ -2756,7 +2915,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 # num_divisions = int(len(systematics_training_set)/N)
                 chunk = systematics_training_set[n::N,:,:]
                 extraction = py21cmsig.pylinex_extraction(chunk,signal,data,noise,signal,frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
                 if use_fit_noise:
                     systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics.flatten())/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
                     signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
@@ -2772,7 +2931,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 # num_divisions = int(len(systematics_training_set)/N)
                 chunk = signal_training_set[n::N]
                 extraction = py21cmsig.pylinex_extraction(systematics,chunk,data,noise,signal,frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
                 if use_fit_noise:
                     systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics)/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
                     signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
@@ -2917,7 +3076,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             print(f"STD of Reduced Chi Squared Distribution: {chi_squared_array.std()}")
 
     if test_mode == "goodness of fit":
-        return extractions_array,chi_squared_array, psi_squared_array, systematics_array,extraction[0], extraction[1], extraction, signal_terms_used, systematics_terms_used 
+        return extractions_array,chi_squared_array, psi_squared_array, systematics_array,extraction[0], extraction[1], extraction, signal_terms_used, systematics_terms_used, random_signal_index_array 
     if test_mode == "random noise":
         return extractions_array, mean,sigma1,sigma2,sigma3,chi_squared_array, psi_squared_array, systematics_array,extraction[0],mean_sys, extraction[1], extraction, signal_terms_used, systematics_terms_used
     if test_mode == "training set size":
