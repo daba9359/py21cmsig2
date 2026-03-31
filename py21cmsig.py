@@ -477,7 +477,7 @@ def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0,C_Tk=5.5
     Tk_array = np.array([z,T])   
     return Tk_array, Tk_function,xe_function, xe_array,xe_0
 
-def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0,C_Tk=5.5,C_dxe=0.25,verbose=True):
+def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM0,C_Tk=4,C_dxe=0.15,verbose=True):
     """"Creates a training set of singal curves based on the parameter range of the dark matter self-annihilation model.
     
     Parameters
@@ -2460,7 +2460,7 @@ def gaussian_beams(frequencies,std,resolution=NSIDE,monochromatic_mode = False, 
     return beams
 
 def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,signal,frequency_array,IC="DIC",verbose=True,plot=True,plot_residual=False,num_basis_vectors=100,num_sys_vectors = 50, \
-                       num_sig_vectors = 10, title = "Pylinex Extraction", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,multi_spectra=False,priors=False,covariance_expansion_factor=1):
+                       num_sig_vectors = 10, title = "Pylinex Extraction", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,man_sys_terms_lower=0,man_sig_terms_lower=0,multi_spectra=False,priors=False,covariance_expansion_factor=1):
      """Streamlines the pylinex extraction and inputs. Note that this only accepts a one (any single component fit) or two component data set as of now 
      (systematics and signal).
     
@@ -2516,6 +2516,8 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
         sig_2_noise = signal_basis.terms_necessary_to_reach_noise_level
         if ignore_IC:
             dimension = [{'systematics' : np.arange(sys_2_noise,sys_2_noise+1)}, {'signal' : np.arange(sig_2_noise,sig_2_noise+1)}]   # sets the min an max number of SVD modes to use in the fit.
+        elif (man_sys_terms_lower !=0) & (man_sig_terms_lower !=0) & (man_sys_terms != 0) & (man_sig_terms != 0):
+            dimension = [{'systematics' : np.arange(man_sys_terms_lower,man_sys_terms+1)}, {'signal' : np.arange(man_sig_terms_lower,man_sig_terms+1)}]
         elif (man_sys_terms != 0) & (man_sig_terms == 0):
             dimension = [{'systematics' : np.arange(man_sys_terms,man_sys_terms+1)}, {'signal' : np.arange(1,num_sig_vectors)}]   
         elif (man_sig_terms != 0) & (man_sys_terms == 0):    
@@ -2561,12 +2563,15 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
         sig_2_noise = bases[1].terms_necessary_to_reach_noise_level
         if ignore_IC:
             dimension = [{'systematics' : np.arange(sys_2_noise,sys_2_noise+1)}, {'signal' : np.arange(sig_2_noise,sig_2_noise+1)}]   # sets the min an max number of SVD modes to use in the fit.
+        elif (man_sys_terms_lower !=0) & (man_sig_terms_lower !=0) & (man_sys_terms != 0) & (man_sig_terms != 0):
+            dimension = [{'systematics' : np.arange(man_sys_terms_lower,man_sys_terms+1)}, {'signal' : np.arange(man_sig_terms_lower,man_sig_terms+1)}]
         elif (man_sys_terms != 0) & (man_sig_terms == 0):
             dimension = [{'systematics' : np.arange(man_sys_terms,man_sys_terms+1)}, {'signal' : np.arange(1,num_sig_vectors)}]   
         elif (man_sig_terms != 0) & (man_sys_terms == 0):    
             dimension = [{'systematics' : np.arange(1,num_sys_vectors)}, {'signal' : np.arange(man_sig_terms,man_sig_terms+1)}]
         elif (man_sys_terms != 0) & (man_sig_terms != 0):
             dimension = [{'systematics' : np.arange(man_sys_terms,man_sys_terms+1)}, {'signal' : np.arange(man_sig_terms,man_sig_terms+1)}] 
+
         else:
             dimension = [{'systematics' : np.arange(1,num_sys_vectors)}, {'signal' : np.arange(1,num_sig_vectors)}]   # sets the min an max number of SVD modes to use in the fit.
         if priors:
@@ -3548,7 +3553,7 @@ def spectral_index_map (f_low,f_high,n_regions,temp1,temp2,NSIDE,ULSA_direction_
 
     if plot_spectral_map:
         hp.mollview(spectral_index,min = spectral_index.mean()-spectral_index.std()*std_range,max= spectral_index.mean()+spectral_index.std()*std_range)
-        plt.title(title)
+        plt.title(title,fontsize=20)
     if plot_region_map:
         patch=perses.models.PatchyForegroundModel(frequency_range,spectral_index,n_regions)
         patch.plot_patch_map
