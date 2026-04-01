@@ -2882,7 +2882,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             rms_array_systematics[n] = ((systematics_diff**2).mean())**(1/2)
             rms_array_signal[n] = ((signal_diff**2).mean())**(1/2)
         
-            if display_type == "cumulative sigmas":
+            if (display_type == "cumulative sigmas") | (display_type == "histogram") :
                 extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
                 systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
 
