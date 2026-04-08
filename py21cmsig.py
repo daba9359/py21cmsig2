@@ -930,7 +930,7 @@ def MCDM_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
     ====================================================
     training_set: An array with your desired number of varied 21 cm curves
     training_set_params: Parameters associated with each curve."""
-    derp = parameters[0][1]
+    # derp = parameters[0][1]
     redshift_array=np.arange(20,1100,0.01)
     training_set_rs = np.ones((N,len(redshift_array)))    # dummy array for the expanded training set in redshift
     training_set = np.ones((N,len(frequency_array)))      # dummy array for the expanded training set in frequency
@@ -948,7 +948,7 @@ def MCDM_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
             parameter_interpolators[p] = parameter_interpolator
     
     if N == 1:
-        training_set_params = parameters
+        training_set_params = [parameters]
     else:
         for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
             new_params = np.array([])
@@ -2758,7 +2758,9 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
     rms_array_systematics = np.zeros((N))  # blank array for later. The 2 dimension allows for a row for systematics and a row for signal
     rms_array_signal = np.zeros((N))  # blank array for later. The 2 dimension allows for a row for systematics and a row for signal
     extractions_array = np.zeros((N,len(frequency_array)))
+    fit_error_array = np.zeros((N,len(frequency_array)))
     systematics_array = np.zeros((N,len(frequency_array)))
+    extraction_dict = {}
     if multi_spectra == True:
         systematics_array = np.zeros((N,len(frequency_array)*len(noise)))
     systematics_terms_used = np.zeros((N))
@@ -2777,6 +2779,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             sim_data = py21cmsig.simulation_run(systematics,signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
                         num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+            extraction_dict[n] = extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2791,6 +2794,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         
             if display_type == "cumulative sigmas":
                 extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
+                fit_error_array[n] = extraction[0].subbasis_channel_error("signal")
                 systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
 
             if (plot == True) & (display_type == "cumulative"):
@@ -2806,6 +2810,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
                         num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+            extraction_dict[n] = extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2820,6 +2825,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         
             if display_type == "cumulative sigmas":
                 extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
+                fit_error_array[n] = extraction[0].subbasis_channel_error("signal")
                 systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
 
             if (plot == True) & (display_type == "cumulative"):
@@ -2852,6 +2858,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         
             if display_type == "cumulative sigmas":
                 extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
+                fit_error_array[n] = extraction[0].subbasis_channel_error("signal")
                 systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
 
             if (plot == True) & (display_type == "cumulative"):
@@ -2884,6 +2891,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         
             if (display_type == "cumulative sigmas") | (display_type == "histogram") :
                 extractions_array[n] = extraction[0].subbasis_channel_mean("signal")
+                fit_error_array[n] = extraction[0].subbasis_channel_error("signal")
                 systematics_array[n] = extraction[0].subbasis_channel_mean("systematics")
 
             if (plot == True) & (display_type == "cumulative"):
@@ -3023,6 +3031,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             mean_rms_array[n]=((extractions_array[n]-mean)**2).mean()**(1/2)
         sorted = np.sort(mean_rms_array)
         mean = extractions_array[np.where(mean_rms_array == sorted[0])][0]
+        mean_extraction = extraction_dict[[np.where(mean_rms_array == sorted[0])][0][0][0]]
+        mean_fit_error = fit_error_array[np.where(mean_rms_array == sorted[0])][0]
         sigma1 = extractions_array[np.where(mean_rms_array == sorted[sig1_index])][0]
         sig1_diff = np.abs(sigma1-mean)
         sigma2 = extractions_array[np.where(mean_rms_array == sorted[sig2_index])][0]
@@ -3083,7 +3093,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
     if test_mode == "goodness of fit":
         return extractions_array,chi_squared_array, psi_squared_array, systematics_array,extraction[0], extraction[1], extraction, signal_terms_used, systematics_terms_used, random_signal_index_array 
     if test_mode == "random noise":
-        return extractions_array, mean,sigma1,sigma2,sigma3,chi_squared_array, psi_squared_array, systematics_array,extraction[0],mean_sys, extraction[1], extraction, signal_terms_used, systematics_terms_used
+        return extractions_array, mean,sigma1,sigma2,sigma3,chi_squared_array, psi_squared_array, systematics_array,extraction[0],mean_sys, extraction[1], extraction, signal_terms_used, systematics_terms_used, mean_fit_error, mean_extraction
     if test_mode == "training set size":
         return rms_array_systematics,rms_array_signal, max_sys, max_sig, chunk, extraction[1]
     
