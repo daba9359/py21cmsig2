@@ -232,11 +232,11 @@ redshift_array = 1420.4/frequency_array-1
 # foreground_array_minCMB[np.where(foreground_array_minCMB<0.0)] = 0
 
 # radiometer noise
-sigT = lambda T_b, N, dnu, dt: T_b/(N*(np.sqrt(dnu*dt)))
+sigT = lambda T_b, N, dnu, dt: T_b/((np.sqrt(N*dnu*dt)))
 # Noise parameters
-dnu = 1e6
-dt = 10000*3600 # first number is the number of hours of integration time
-N_antenna = 2
+# dnu = 1e6
+# dt = 10000*3600 # first number is the number of hours of integration time
+# N_antenna = 2
 
 # Synchrotron Equation
 synch = lambda f,A,B,c : A*(f/408)**(B+c*np.log(f/408))  # taken from page 6 of Hibbard et al. 2023 Apj. Arbitrarily chose 25 as my v0
@@ -513,7 +513,7 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
         for p in range(len(parameters)):
             x = range(len(parameters[p]))
             y = parameters[p]
-            parameter_interpolator = scipy.interpolate.CubicSpline(x,y)
+            parameter_interpolator = scipy.interpolate.interp1d(x,y)
             parameter_interpolators[p] = parameter_interpolator
         
         for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
@@ -1337,8 +1337,8 @@ def PBH_training_set(frequency_array,parameters,N,verbose=True):
     max_z = conversion(frequency_array[0])
     if max_z > 1100:
         max_z = 1100
-        print(f"Your largest redshift is {max_z}, which is before recombination. This functions will set your largest redshift equal to recombination for calculation. \
-This will likely make your plot look odd at frequencies larger than around 1.5 MHz")
+        #print(f"Your largest redshift is {max_z}, which is before recombination. This functions will set your largest redshift equal to recombination for calculation. \
+#This will likely make your plot look odd at frequencies larger than around 1.5 MHz")
     else:
         max_z = max_z
     redshift_array = np.arange(conversion(frequency_array[-1]),max_z)
@@ -2160,6 +2160,7 @@ def synchrotron_foreground_forsigex(n_regions,frequencies,reference_frequency,sk
     t=0
     synchrotron = synch
     optimized_parameters = np.zeros((n_regions,3)) # three parameters in the synchrotron model: Amplitude, spectral index, spectral cuvature
+    optimized_parameters_errors = np.zeros((n_regions,3,3)) # three parameters in the synchrotron model: Amplitude, spectral index, spectral cuvature
     patch=perses.models.PatchyForegroundModel(frequencies,sky_map[reference_frequency-1],n_regions) # define the regional patches
     B_values = np.zeros((len(BTS_curves),len(frequencies),n_regions))
     for i,b in enumerate(BTS_params):
@@ -2181,7 +2182,9 @@ def synchrotron_foreground_forsigex(n_regions,frequencies,reference_frequency,sk
         region_temps = region_temps_interp(frequencies)
         region_data[i] = region_temps
         params = scipy.optimize.curve_fit(synchrotron,frequencies,region_temps,maxfev=5000)[0]
+        errors = scipy.optimize.curve_fit(synchrotron,frequencies,region_temps,maxfev=5000)[1]
         optimized_parameters[i] = params
+        optimized_parameters_errors[i] = errors
 
 
 
@@ -2243,7 +2246,7 @@ def synchrotron_foreground_forsigex(n_regions,frequencies,reference_frequency,sk
 
     
 
-    return optimized_parameters,new_curves,masked_indices, training_set, training_set_params, new_foreground_deltaT
+    return optimized_parameters,new_curves,masked_indices, training_set, training_set_params, new_foreground_deltaT, optimized_parameters_errors
 
 ## NOTE: This doesn't include multiple time stamps. Do we need to even bother? Something to think about.
 def expanded_training_set_no_t(STS_data,STS_params,N,custom_parameter_range=np.array([0]),show_parameter_ranges=False):
@@ -2500,8 +2503,6 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
 
      if ignore_IC & (man_sig_terms != 0 | man_sig_terms != 0):
           raise TypeError("You are attempting two types of mode optimizations at once. Set ignore_IC to False or remove the values for the manually set mode numbers.")
-    
-   
 
      if multi_spectra == False:
         temperatures = data  # sets the data to fit to.
@@ -2552,11 +2553,11 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
         noise_level_flat = noise.flatten()
         Ns = len(noise)      # grabs the number of correlated spectra you are using
         names = ["signal","systematics"]        # names of your bases
-        bases = [TrainedBasis(training_set=signal_training_set,num_basis_vectors=num_basis_vectors,error=noise_level_flat, expander = RepeatExpander(Ns)),\
-                 TrainedBasis(training_set=flattened_systematics_training_set,num_basis_vectors=num_basis_vectors,error=noise_level_flat, expander=NullExpander())]     # creates the correlated spectrum bases
+        bases = [TrainedBasis(training_set=signal_training_set,num_basis_vectors=num_basis_vectors,error=noise_level_flat, expander = RepeatExpander(Ns),mean_translation=True),\
+                 TrainedBasis(training_set=flattened_systematics_training_set,num_basis_vectors=num_basis_vectors,error=noise_level_flat, expander=NullExpander(),mean_translation=True)]     # creates the correlated spectrum bases
         bases[0].generate_gaussian_prior(covariance_expansion_factor=covariance_expansion_factor)
         if priors:
-            priors = {"signal_prior" : bases[0].gaussian_prior}
+            priors = {"signal_prior" : bases[0].gaussian_prior, "systematics_prior": bases[1].gaussian_prior}
         basis_sum = BasisSum(names,bases)                    # sums the two components together (acts as placeholder for one component fit)
         quantity = AttributeQuantity(IC)                                                                   # sets the quantity to minimize
         sys_2_noise = bases[0].terms_necessary_to_reach_noise_level                                # terms needed to reach the noise level for the systematics basis
@@ -2603,6 +2604,7 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
           plt.plot(frequency_array,signal,label="input signal",color="black")
           plt.fill_between(frequency_array,fitter.subbasis_channel_mean("signal")+pylinex_error,fitter.subbasis_channel_mean("signal")-\
                               pylinex_error,alpha=0.25,label="fit error",color="blue")
+          plt.ylim(ylim)
           plt.fill_between(frequency_array,fitter.subbasis_channel_mean("signal")+radiometer_error,fitter.subbasis_channel_mean("signal")-\
                               radiometer_error,alpha=0.25,label="radiometer noise",color="red")
           plt.xticks(ticks=np.arange(5,51,1),minor=True)
@@ -2612,7 +2614,7 @@ def pylinex_extraction(systematics_training_set,signal_training_set,data,noise,s
           plt.ylabel(r"$\delta T_b$ [K]",fontsize=15)
           plt.title(title+f" Signal Component (sig terms = {fitter.sizes["signal"]}, sys terms = {fitter.sizes["systematics"]})", fontsize=20)
           plt.grid()
-          plt.ylim(ylim)
+          
           plt.legend()
 
      if plot_residual:
@@ -2678,10 +2680,10 @@ def training_set_test(training_set,noise,num_divisions=10,num_basis_vectors=100,
 
 # Now let's create a CDF function that plots the bias and the error values
 
-def extraction_statistics(N,systematics_training_set,signal_training_set,data,noise,signal,systematics,frequency_array,IC="DIC",verbose=True,plot=True,num_basis_vectors=100,num_sys_vectors = 50, \
-                       num_sig_vectors = 10, title = "CDF ", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,display_type = "CDF", test_mode = "random noise",num_divisions=10\
-                        ,N_antenna=N_antenna,dnu=dnu,dt=dt,save_path = "",use_fit_noise=False,xlim=None,training_set_to_test = "systematics",restrict_runs=0, multi_spectra = False,priors=False,\
-                            sigma_plot = 3,vertical_lines=None,covariance_expansion_factor=1):
+def extraction_statistics(N,systematics_training_set,signal_training_set,data,noise,signal,systematics,frequency_array,N_antenna,dnu,dt,IC="DIC",verbose=True,plot=True,num_basis_vectors=100,num_sys_vectors = 50, \
+                       num_sig_vectors = 10, title = "CDF", ignore_IC = False,ylim=None,man_sys_terms=0,man_sig_terms=0,display_type = "CDF", test_mode = "random noise",num_divisions=10\
+                        ,save_path = "",use_fit_noise=False,xlim=None,training_set_to_test = "systematics",restrict_runs=0, multi_spectra = False,priors=False,\
+                            sigma_plot = 3,vertical_lines=None,covariance_expansion_factor=1,man_sys_terms_lower=0,man_sig_terms_lower=0):
     """Evaluates a set of statistics based on input systematics and signal vs extraction. This requires you to know the foreground and signal
     inputs. It is designed to be a test of the pipeline, not a test of the data.
     
@@ -2778,7 +2780,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         if (test_mode == "random noise") & (multi_spectra == False):
             sim_data = py21cmsig.simulation_run(systematics,signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor\
+                            ,man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)   # performs the pylinex extraction
             extraction_dict[n] = extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
@@ -2809,7 +2812,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         if (test_mode == "random noise") & (multi_spectra == True):
             sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor,\
+                        man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)
             extraction_dict[n] = extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
@@ -2843,7 +2847,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             random_signal_index_array[n] = random_index
             sim_data = py21cmsig.simulation_run(systematics,random_signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor,\
+                               man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2876,7 +2881,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
             random_signal_index_array[n] = random_index
             sim_data = py21cmsig.multi_spectra_simulation_run(frequency_array,systematics,random_signal,N_antenna,dnu,dt)
             extraction = py21cmsig.pylinex_extraction(systematics_training_set,signal_training_set,sim_data[0],sim_data[5],sim_data[1],frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor,\
+                            man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)   # performs the pylinex extraction
             chi_squared_array[n] = extraction[0].reduced_chi_squared
             psi_squared_array[n] = extraction[0].psi_squared
             if use_fit_noise:
@@ -2912,7 +2918,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 # num_divisions = int(len(systematics_training_set)/N)
                 chunk = systematics_training_set[n::N]
                 extraction = py21cmsig.pylinex_extraction(chunk,signal,data,noise,signal,frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor,\
+                               man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)   # performs the pylinex extraction
                 if use_fit_noise:
                     systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics)/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
                     signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
@@ -2928,7 +2935,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 # num_divisions = int(len(systematics_training_set)/N)
                 chunk = systematics_training_set[n::N,:,:]
                 extraction = py21cmsig.pylinex_extraction(chunk,signal,data,noise,signal,frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor,\
+                               man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)   # performs the pylinex extraction
                 if use_fit_noise:
                     systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics.flatten())/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
                     signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
@@ -2944,7 +2952,8 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
                 # num_divisions = int(len(systematics_training_set)/N)
                 chunk = signal_training_set[n::N]
                 extraction = py21cmsig.pylinex_extraction(systematics,chunk,data,noise,signal,frequency_array,IC=IC,verbose=False,plot=False,plot_residual=False,num_basis_vectors=num_basis_vectors,num_sys_vectors = num_sys_vectors, \
-                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor)   # performs the pylinex extraction
+                        num_sig_vectors = num_sig_vectors, title = title, ignore_IC = ignore_IC,ylim=ylim,man_sys_terms=man_sys_terms,man_sig_terms=man_sig_terms,multi_spectra=multi_spectra,priors=priors,covariance_expansion_factor=covariance_expansion_factor,\
+                            man_sys_terms_lower = man_sys_terms_lower,man_sig_terms_lower=man_sig_terms_lower)   # performs the pylinex extraction
                 if use_fit_noise:
                     systematics_diff = (extraction[0].subbasis_channel_mean("systematics") - systematics)/extraction[0].subbasis_channel_error("systematics") # determines the bias in the systematics normalized to the fit error
                     signal_diff = (extraction[0].subbasis_channel_mean("signal") - signal)/extraction[0].subbasis_channel_error("signal")  
@@ -2973,18 +2982,20 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
     if (test_mode == "training set size") & (plot == True): 
 
         plt.plot(frequency_array,signal,color='black',ls="--",label="input signal")
+        plt.ylim(ylim)
         plt.fill_between(frequency_array,signal+noise,signal-\
                               noise,alpha=0.25,label="radiometer noise",color="red")
-        plt.ylim(ylim)
+        
         plt.legend()
         plt.grid() 
         plt.savefig(save_path+title)
 
     if (test_mode == "random noise") & (plot == True) & (display_type == "cumulative"):            
         plt.plot(frequency_array,signal,color='black',ls="--",label="input signal")
+        plt.ylim(ylim)
         plt.fill_between(frequency_array,signal+noise,signal-\
                               noise,alpha=0.25,label="radiometer noise",color="red")
-        plt.ylim(ylim)
+        
         plt.legend()
         plt.savefig(save_path+title)
 
@@ -3017,8 +3028,7 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
 
     if (display_type == "cumulative sigmas") & (test_mode == "random noise"):
         plt.plot(frequency_array,signal,color='black',ls="--",label="input signal")
-        plt.fill_between(frequency_array,signal+noise,signal-\
-                              noise,alpha=0.25,label="radiometer noise",color="red")
+        
 
         mean_rms_array = np.zeros((N))
         mean_rms_array_sys = np.zeros((N))
@@ -3044,26 +3054,28 @@ def extraction_statistics(N,systematics_training_set,signal_training_set,data,no
         sorted_sys = np.sort(mean_rms_array_sys)
         mean_sys = systematics_array[np.where(mean_rms_array_sys == sorted_sys[0])][0]
         
-        plt.plot(frequency_array,mean,color="blue",alpha=0.5,label="mean extraction")
-        if sigma_plot == 3:
-            plt.fill_between(frequency_array,mean-sig3_diff,mean+sig3_diff,alpha=0.25,label="3 sigma extraction",color="gray")
-            plt.fill_between(frequency_array,mean-sig2_diff,mean+sig2_diff,alpha=0.25,label="2 sigma extraction",color="cyan")
-            plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
-        if sigma_plot == 2:
-            plt.fill_between(frequency_array,mean-sig2_diff,mean+sig2_diff,alpha=0.25,label="2 sigma extraction",color="cyan")
-            plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
-        if sigma_plot == 1:
-            plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
-                
-        plt.xticks(ticks=np.arange(5,51,1),minor=True)
-        plt.xticks(size=20)
-        plt.xlabel("Frequency [MHz]",fontsize=15)
-        plt.yticks(fontsize=15)
-        plt.ylabel(r"$\delta T_b$ [K]",fontsize=15)
-        plt.title(title+f" {N} Extractions", fontsize=20)
-        plt.ylim(ylim)
-        plt.grid()
-        plt.legend()
+        if plot == True:
+            plt.plot(frequency_array,mean,color="blue",alpha=0.5,label="mean extraction")
+            if sigma_plot == 3:
+                plt.fill_between(frequency_array,mean-sig3_diff,mean+sig3_diff,alpha=0.25,label="3 sigma extraction",color="gray")
+                plt.fill_between(frequency_array,mean-sig2_diff,mean+sig2_diff,alpha=0.25,label="2 sigma extraction",color="cyan")
+                plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
+            if sigma_plot == 2:
+                plt.fill_between(frequency_array,mean-sig2_diff,mean+sig2_diff,alpha=0.25,label="2 sigma extraction",color="cyan")
+                plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
+            if sigma_plot == 1:
+                plt.fill_between(frequency_array,mean-sig1_diff,mean+sig1_diff,alpha=0.25,label="1 sigma extraction",color="blue")
+            plt.ylim(ylim)
+            plt.fill_between(frequency_array,signal+noise,signal-\
+                              noise,alpha=0.25,label="radiometer noise",color="red")      
+            plt.xticks(ticks=np.arange(5,51,1),minor=True)
+            plt.xticks(size=20)
+            plt.xlabel("Frequency [MHz]",fontsize=15)
+            plt.yticks(fontsize=15)
+            plt.ylabel(r"$\delta T_b$ [K]",fontsize=15)
+            plt.title(title+f" {N} Extractions", fontsize=20)
+            plt.grid()
+            plt.legend()
 
     if (plot == True) & (display_type == "histogram") & (test_mode == "goodness of fit"):
         plt.hist(chi_squared_array,color="blue",alpha=0.5)
@@ -3165,7 +3177,13 @@ def multi_spectra_simulation_run(frequencies,data_array,input_signal,N_antenna,d
     dt: Integration time. For the noise function.
 
     Returns
-    ==========================================="""
+    ===========================================
+    simulation: results of the simulation with noise, systematics, and signal
+    signal_only: Just the signal. No noise
+    foreground_only: Just the foreground (systematics). No noise.
+    noise_only: Just the specific noise realization.
+    simulation_no_noise: Simulation without noise (just systematics + signal)
+    noise_function: The standard deviation of the gaussian noise as a function of frequency"""
 
     multi_spectra_sim = {}
     for n in range(len(data_array)):
@@ -4099,7 +4117,7 @@ def synchrotron_foreground_updated_given_Bvalues(N,n_regions,frequencies,spectra
     sky_map: The galaxy map, rotated into your LST, that is being used for the simulated data. Shape(frequency bins, NPIX)
     parameter_variation:  The variation in the parameters. This will be a multiplicative factor. Shoud be shape (3)
     B_values: Array of B_values, which are the weights per region given a specific beam. Needs to be shape (number of beams in ts, freqeuncy bins,regions)
-    BTS_curves: The beam training set curves. This should already include the beams weighting the base foreground model.
+    BTS_curves: The beam training set curves only for the base foreground model (beams weighting the base foreground model).
                 I could make this function do that, but it often takes some time, so I think it's better to do that externally
                 in case you wanted to save it and  Should be shape (n curves,frequency bins)
     BTS_params: The parameters associated with each beam that weighted each foreground
@@ -4177,7 +4195,7 @@ def synchrotron_foreground_updated_given_Bvalues(N,n_regions,frequencies,spectra
         new_curves[b] = BTS_curves[index_array[b]]+weighted_deltaT[b]
         parameters = BTS_params[index_array]
 
-    return new_curves,parameters, optimized_parameters, new_foreground_deltaT, BTS_curves,index_array,weighted_deltaT
+    return new_curves,parameters,new_parameters, optimized_parameters, new_foreground_deltaT, BTS_curves,index_array,weighted_deltaT
 
 def synchrotron_foreground_updated(n_regions,frequencies,spectral_index_map,sky_map, BTS_curves, BTS_params,\
                            beam_sky_training_set,N,parameter_variation,B_value_functions\
@@ -4450,3 +4468,31 @@ def plot_extraction_array (frequency_array,signal,noise,extractions_array,system
     plt.ylim(ylim)
     plt.grid()
     plt.legend()
+
+def create_BTS_curves (frequency_array,frequency_range,B_values,sky_maps,n_regions,spectral_index_maps,n_LSTs):
+    """Create the BTS_curves needed as an input for other functions.
+
+    Parameters
+    ==============================================================
+    frequency_array: The frequencies you would like your BTS_curves to be interpolated over. Important for matching the input of your other functions.
+    frequency_range: The frequency array that pertains to your sky maps.
+    B_values: The B_values associated with the regions you've created to model the foreground. Must be same number of frequency bins as your sky_map
+    sky_map: The base model of your foreground. Should be shape (frequency bins, pixel count)
+    n_regions: Number of regions used to create your regions for your foreground model
+    spectral_index_map: The spectral index map used to create your regions for your foreground model.
+    n_LSTs: Number of LSTs in this BTS_curve set.
+
+    Returns
+    =============================================================="""
+    BTS_curves_raw = np.zeros((n_LSTs,len(B_values[0]),len(sky_maps[0])))
+    BTS_curves = np.zeros((n_LSTs,len(B_values[0]),len(frequency_array)))
+    for l in range(n_LSTs):
+        for BTS in tqdm(range(len(B_values[0]))):
+            patch=perses.models.PatchyForegroundModel(frequency_array,spectral_index_maps[l],n_regions) # define the regional patches
+            region_indices = patch.foreground_pixel_indices_by_region_dictionary
+            for f in range(len(sky_maps[0])):
+                for r in range(n_regions):
+                    BTS_curves_raw[l,BTS,f] += (sky_maps[l,f,region_indices[r]]*B_values[l,BTS,f,r]).sum()/len(region_indices[r])
+            interpolator = scipy.interpolate.CubicSpline(frequency_range,BTS_curves_raw[l,BTS,:])
+            BTS_curves[l,BTS,:] = interpolator(frequency_array)
+    return BTS_curves
