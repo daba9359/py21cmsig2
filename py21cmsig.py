@@ -3162,47 +3162,113 @@ def make_foreground (base_sky_model,custom_parameters,n_regions=5,reference_freq
 
     return new_foreground, region_indices, temps_per_region, optimized_parameters
 
-def multi_spectra_simulation_run(frequencies,data_array,input_signal,N_antenna,dnu,dt):
-    """Creates an array of mutliple simulation runs for different spectra
+# def multi_spectra_simulation_run(frequencies,data_array,input_signal,N_antenna,dnu,dt):
+#     """Creates an array of mutliple simulation runs for different spectra
     
-    Parameters
-    ===========================================
-    frequencies: Frequency array.
-    input_array: This is an array of a realization of the systematics per spectra. An example would be 10 different Local Sidereal Times for an observatory,
-                 where each of those LSTs would be weighted by the same beam. The array would, therfore, be of the shape (number of LSTs, number of frequency bins)
-                 Note that this does not include the noise or the signal. That is added in this function
-    input_signal: The signal that will be added to each spectra.
-    N_antenna: Number of antennas in your system.
-    dnu: The bin size of the frequency bins. For the noise function.
-    dt: Integration time. For the noise function.
+#     Parameters
+#     ===========================================
+#     frequencies: Frequency array.
+#     input_array: This is an array of a realization of the systematics per spectra. An example would be 10 different Local Sidereal Times for an observatory,
+#                  where each of those LSTs would be weighted by the same beam. The array would, therfore, be of the shape (number of LSTs, number of frequency bins)
+#                  Note that this does not include the noise or the signal. That is added in this function
+#     input_signal: The signal that will be added to each spectra.
+#     N_antenna: Number of antennas in your system.
+#     dnu: The bin size of the frequency bins. For the noise function.
+#     dt: Integration time. For the noise function.
 
-    Returns
-    ===========================================
-    simulation: results of the simulation with noise, systematics, and signal
-    signal_only: Just the signal. No noise
-    foreground_only: Just the foreground (systematics). No noise.
-    noise_only: Just the specific noise realization.
-    simulation_no_noise: Simulation without noise (just systematics + signal)
-    noise_function: The standard deviation of the gaussian noise as a function of frequency"""
+#     Returns
+#     ===========================================
+#     simulation: results of the simulation with noise, systematics, and signal
+#     signal_only: Just the signal. No noise
+#     foreground_only: Just the foreground (systematics). No noise.
+#     noise_only: Just the specific noise realization.
+#     simulation_no_noise: Simulation without noise (just systematics + signal)
+#     noise_function: The standard deviation of the gaussian noise as a function of frequency"""
 
-    multi_spectra_sim = {}
-    for n in range(len(data_array)):
-        multi_spectra_sim[n] = py21cmsig.simulation_run(data_array[n],input_signal,N_antenna,dnu,dt)
+#     multi_spectra_sim = {}
+#     for n in range(len(data_array)):
+#         multi_spectra_sim[n] = py21cmsig.simulation_run(data_array[n],input_signal,N_antenna,dnu,dt)
 
-    ## puts the data into an array that works for the input of the pylinex extraction function:
-    simulation = np.zeros((len(data_array),len(frequencies)))
-    noise_only = np.zeros((len(data_array),len(frequencies)))
-    simulation_no_noise = np.zeros_like(data_array)
-    noise_function = np.zeros((len(data_array),len(frequencies)))
-    for n in range(len(data_array)):
-        simulation[n] = multi_spectra_sim[n][0]
-        simulation_no_noise = multi_spectra_sim[n][4]
-        noise_only[n] = multi_spectra_sim[n][3]
-        noise_function[n] = multi_spectra_sim[n][5]
-    signal_only = input_signal
-    foreground_only = data_array
+#     ## puts the data into an array that works for the input of the pylinex extraction function:
+#     simulation = np.zeros((len(data_array),len(frequencies)))
+#     noise_only = np.zeros((len(data_array),len(frequencies)))
+#     simulation_no_noise = np.zeros_like(data_array)
+#     noise_function = np.zeros((len(data_array),len(frequencies)))
+#     for n in range(len(data_array)):
+#         simulation[n] = multi_spectra_sim[n][0]
+#         simulation_no_noise = multi_spectra_sim[n][4]
+#         noise_only[n] = multi_spectra_sim[n][3]
+#         noise_function[n] = multi_spectra_sim[n][5]
+#     signal_only = input_signal
+#     foreground_only = data_array
 
-    return simulation, signal_only, foreground_only, noise_only, simulation_no_noise, noise_function
+#     return simulation, signal_only, foreground_only, noise_only, simulation_no_noise, noise_function
+
+def multi_spectra_simulation_run(
+    frequencies,
+    data_array,
+    input_signal,
+    N_antenna,
+    dnu,
+    dt,
+    noise_realization=None,
+    rng=None
+):
+    foreground_only = np.asarray(data_array, dtype=float)
+    signal_only = np.asarray(input_signal, dtype=float)
+
+    N_LST, N_freq = foreground_only.shape
+
+    if len(frequencies) != N_freq:
+        raise ValueError("Frequency and foreground dimensions do not match.")
+
+    if signal_only.shape not in [(N_freq,), (N_LST, N_freq)]:
+        raise ValueError("Incorrect input_signal shape.")
+
+    # Foreground + cosmological signal
+    simulation_no_noise = foreground_only + signal_only
+
+    # Radiometer noise standard deviation
+    noise_function = np.asarray(
+        sigT(simulation_no_noise, N_antenna, dnu, dt),
+        dtype=float
+    )
+
+    if noise_realization is None:
+
+        # Generate a new noise realization
+        if rng is None:
+            noise_only = np.random.normal(
+                0.0, noise_function
+            )
+        else:
+            noise_only = rng.normal(
+                0.0, noise_function
+            )
+
+    else:
+
+        # Reuse the exact supplied noise realization
+        noise_only = np.asarray(
+            noise_realization, dtype=float
+        )
+
+        if noise_only.shape != foreground_only.shape:
+            raise ValueError(
+                f"Expected noise shape {foreground_only.shape}, "
+                f"received {noise_only.shape}"
+            )
+
+    simulation = simulation_no_noise + noise_only
+
+    return (
+        simulation,
+        signal_only,
+        foreground_only,
+        noise_only,
+        simulation_no_noise,
+        noise_function
+    )
 
 
 def multi_region_synch_model (n_regions,frequencies,reference_frequency,sky_map,beam_training_set,beam_training_set_parameters,\
