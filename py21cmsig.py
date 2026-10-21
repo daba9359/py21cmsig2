@@ -115,6 +115,28 @@ camb_xe = camb_data.get_background_redshift_evolution(z_array, ["x_e"], format="
 camb_xe_interp = scipy.interpolate.CubicSpline(z_array,camb_xe.flatten())  # Needs a redshift argument
 
 
+def x_HI_modH0(z, x_e):
+    """
+    Approximate neutral hydrogen fraction from CAMB's
+    free-electron abundance.
+
+    Appropriate as an interim approximation when
+    helium contributions are negligible or hydrogen
+    is already fully ionized.
+    """
+
+    xe = np.asarray(x_e(z), dtype=float)
+
+    if not np.all(np.isfinite(xe)):
+        raise ValueError("Non-finite CAMB electron fraction")
+
+    if np.any(xe < 0):
+        raise ValueError("Negative CAMB electron fraction")
+
+    if hasattr(x_e, "x_HI"):
+        return np.asarray(x_e.x_HI(z), dtype=float)
+    return np.clip(1.0 - xe, 0.0, 1.0)
+
 
 # T_gamma
 T_gamma = lambda z: T_gamma0*(1+z)
@@ -137,16 +159,49 @@ n_H = lambda z,x_e: n_b0*(1+z)**3*(1-x_e(z))
 n_e = lambda z,x_e: n_b0*(1+z)**3*(x_e(z))
 n_tot = lambda z: n_b0*(1+z)**3
 
-n_H_modH0 = lambda z,x_e,n_b0: n_b0*(1+z)**3*(1-x_e(z))
+# n_H_modH0 = lambda z,x_e,n_b0: n_b0*(1+z)**3*(1-x_e(z))
+n_H_modH0 = lambda z, x_e, n_b0: (
+    n_b0 * (1 + z)**3 * x_HI_modH0(z, x_e)
+)
 n_e_modH0 = lambda z,x_e,n_b0: n_b0*(1+z)**3*(x_e(z))
+
 
 # x_c
 x_c = lambda z,x_e,T_k: (T_star)/(T_gamma0*(1+z)*A_10)*(n_H(z,x_e)*k_HH(T_k(z))+n_e(z,x_e)*k_eH(T_k(z)))   # HH and eH
 x_c_modH0 = lambda z,x_e,T_k,n_b0: (T_star)/(T_gamma0*(1+z)*A_10)*(n_H_modH0(z,x_e,n_b0)*k_HH(T_k(z))+n_e_modH0(z,x_e,n_b0)*k_eH(T_k(z))) 
 
+
+
+
 # T_S
 T_S = lambda z,x_e,T_k: (1+x_c(z,x_e,T_k))/((1/(T_gamma0*(1+z)))+(x_c(z,x_e,T_k)/T_k(z)))
-T_S_modH0 = lambda z,x_e,T_k,n_b0: (1+x_c_modH0(z,x_e,T_k,n_b0))/((1/(T_gamma0*(1+z)))+(x_c_modH0(z,x_e,T_k,n_b0)/T_k(z)))
+# T_S_modH0 = lambda z,x_e,T_k,n_b0: (1+x_c_modH0(z,x_e,T_k,n_b0))/((1/(T_gamma0*(1+z)))+(x_c_modH0(z,x_e,T_k,n_b0)/T_k(z)))
+
+
+def T_S_modH0(z, x_e, T_k, n_b0):
+
+    T_gamma = T_gamma0 * (1 + np.asarray(z))
+    T_k_values = np.asarray(T_k(z))
+
+    # Calculate collisional coupling only once
+    x_c = np.asarray(
+        x_c_modH0(z, x_e, T_k, n_b0)
+    )
+
+    # Check physical validity
+    if np.any(T_k_values <= 0):
+        raise ValueError("Non-positive kinetic temperature")
+
+    if np.any(x_c < 0) or not np.all(np.isfinite(x_c)):
+        raise ValueError("Invalid collisional coupling")
+
+    T_s = (
+        (1 + x_c) /
+        (1 / T_gamma + x_c / T_k_values)
+    )
+
+    return T_s
+
 
 
 # But that's not the actual data. Need to include optical depth:
@@ -156,7 +211,108 @@ T_S_modH0 = lambda z,x_e,T_k,n_b0: (1+x_c_modH0(z,x_e,T_k,n_b0))/((1/(T_gamma0*(
 # x_e is your fraction of free electrons functions (with z as an argument)
 # T_k is your gas temperature functions (with z as an argument)
 dTb = lambda z,x_e,T_k,omB0,omM0: 27*(1-x_e(z))*((h**2*omB0)/(0.023))*(((0.15)/(h**2*omM0))*((1+z)/(10)))**(1/2)*(1-((T_gamma0*(1+z))/(T_S(z,x_e,T_k))))
-dTb_modH0 = lambda z,x_e,T_k,omB0,omM0,n_b0,h: 27*(1-x_e(z))*((h**2*omB0)/(0.023))*(((0.15)/(h**2*omM0))*((1+z)/(10)))**(1/2)*(1-((T_gamma0*(1+z))/(T_S_modH0(z,x_e,T_k,n_b0))))
+# dTb_modH0 = lambda z,x_e,T_k,omB0,omM0,n_b0,h: 27*(1-x_e(z))*((h**2*omB0)/(0.023))*(((0.15)/(h**2*omM0))*((1+z)/(10)))**(1/2)*(1-((T_gamma0*(1+z))/(T_S_modH0(z,x_e,T_k,n_b0))))
+
+
+def dTb_modH0(z, x_e, T_k, omB0, omM0, n_b0, h):
+    """
+    Differential 21-cm brightness temperature including
+    optical-depth saturation.
+
+    Returns brightness temperature in mK.
+
+    Uses an effective optical depth derived from the
+    standard 27 mK optically thin approximation.
+    """
+
+    z = np.asarray(z, dtype=float)
+
+    # =====================================================
+    # Spin and CMB temperatures
+    # =====================================================
+
+    T_s = np.asarray(
+        T_S_modH0(z, x_e, T_k, n_b0),
+        dtype=float
+    )
+
+    T_cmb = T_gamma0 * (1 + z)
+
+    # =====================================================
+    # Neutral hydrogen fraction
+    # =====================================================
+
+    x_HI = x_HI_modH0(z, x_e)
+
+    # =====================================================
+    # Physical validity checks
+    # =====================================================
+
+    if not np.all(np.isfinite(T_s)) or np.any(T_s <= 0):
+        raise ValueError("Invalid spin temperature")
+
+    if not np.all(np.isfinite(x_HI)):
+        raise ValueError("Invalid neutral hydrogen fraction")
+
+    xe_values = np.asarray(x_e(z), dtype=float)
+    z_values = np.asarray(z, dtype=float)
+
+    bad = (xe_values < 0) | (xe_values > 1)
+
+    if np.any(bad):
+        print("\nCAMB ionization fraction diagnostic")
+        print("----------------------------------")
+        print(f"Minimum x_e: {xe_values.min():.10f}")
+        print(f"Maximum x_e: {xe_values.max():.10f}")
+        print(f"Number of violations: {np.count_nonzero(bad)}")
+
+        for index in np.where(bad)[0][:10]:
+            print(
+                f"z = {z_values[index]:.3f}, "
+                f"x_e = {xe_values[index]:.10f}"
+            )
+
+    if np.any((x_HI < 0) | (x_HI > 1)):
+        raise ValueError(
+            "Neutral fraction outside [0, 1]. "
+            "Check CAMB x_e convention."
+        )
+
+    if omM0 <= 0 or omB0 < 0 or h <= 0:
+        raise ValueError("Invalid cosmological densities")
+
+    # =====================================================
+    # Optically thin normalization in Kelvin
+    # =====================================================
+
+    A_K = (
+        0.027
+        * x_HI
+        * (h**2 * omB0 / 0.023)
+        * np.sqrt(
+            (0.15 / (h**2 * omM0))
+            * ((1 + z) / 10)
+        )
+    )
+
+    # =====================================================
+    # Effective 21-cm optical depth
+    # =====================================================
+
+    tau_21 = A_K * (1 + z) / T_s
+
+    # =====================================================
+    # Full radiative transfer
+    # =====================================================
+
+    dTb_K = (
+        (T_s - T_cmb) / (1 + z)
+        * (-np.expm1(-tau_21))
+    )
+
+    # Return in mK, preserving original function interface
+    return dTb_K * 1000
+
 
 
 ########### Foreground and Beam Related Constants ###################
@@ -255,145 +411,578 @@ pbar = manager.counter(total=100, desc='Progress')
 n_regions = 5
 reference_frequency = 25
 
+# Kinetic temperature solver settings
+TK_RTOL = 1e-7
+TK_ATOL = 1e-8
+
+
+import numpy as np
+from scipy.interpolate import PchipInterpolator
+
+XE_DZ = 1.0
+
+def build_xe_interpolator(camb_data, z_array, dz=XE_DZ):
+
+    z_array = np.asarray(z_array, dtype=float)
+
+    if not np.all(np.isfinite(z_array)):
+        raise ValueError("Non-finite redshift")
+
+    if dz <= 0:
+        raise ValueError("dz must be positive")
+
+    # Use the COMPLETE requested redshift range
+    z_min = float(np.min(z_array))
+    z_max = float(np.max(z_array))
+
+    # Include both endpoints explicitly
+    n_intervals = max(
+        1,
+        int(np.ceil((z_max - z_min) / dz))
+    )
+
+    z_dense = np.linspace(
+        z_min,
+        z_max,
+        n_intervals + 1
+    )
+
+    xe_dense = camb_data.get_background_redshift_evolution(
+        z_dense,
+        vars=["x_e"],
+        format="array"
+    )[:, 0]
+
+    if not np.all(np.isfinite(xe_dense)):
+        raise ValueError("Non-finite CAMB electron fraction")
+
+    if np.any(xe_dense < 0):
+        raise ValueError("Negative CAMB electron fraction")
+
+    # Shape-preserving interpolation
+    xe_interp = PchipInterpolator(
+        z_dense,
+        xe_dense,
+        extrapolate=False
+    )
+
+    return xe_interp
+
+
+
+import numpy as np
+from scipy.interpolate import PchipInterpolator
+# Recfast++ is optional and is used only for independent validation.
+try:
+    from recfast4py import recfast
+except ImportError:
+    recfast = None
+
+
+class IonizationHistory:
+
+    def __init__(self, z, x_e, x_HII):
+
+        z = np.asarray(z, dtype=float).ravel()
+        x_e = np.asarray(x_e, dtype=float).ravel()
+        x_HII = np.asarray(x_HII, dtype=float).ravel()
+
+        if not (len(z) == len(x_e) == len(x_HII)):
+            raise ValueError("Ionization arrays have different lengths")
+
+        if not all(np.all(np.isfinite(a))
+                   for a in (z, x_e, x_HII)):
+            raise ValueError("Non-finite ionization history")
+
+        order = np.argsort(z)
+
+        z = z[order]
+        x_e = x_e[order]
+        x_HII = x_HII[order]
+
+        if np.any(np.diff(z) <= 0):
+            raise ValueError("Duplicate or unordered redshifts")
+
+        if np.any(x_e < 0):
+            raise ValueError("Negative electron fraction")
+
+        if np.any((x_HII < -1e-6) | (x_HII > 1 + 1e-6)):
+            raise ValueError("Invalid hydrogen ionization fraction")
+
+        # Permit only negligible floating-point excursions.
+        x_HII = np.clip(x_HII, 0.0, 1.0)
+
+        self.z_min = z[0]
+        self.z_max = z[-1]
+
+        self._xe = PchipInterpolator(
+            z, x_e, extrapolate=False
+        )
+
+        self._xHII = PchipInterpolator(
+            z, x_HII, extrapolate=False
+        )
+
+    def _check_z(self, z):
+
+        z = np.asarray(z, dtype=float)
+
+        if not np.all(np.isfinite(z)):
+            raise ValueError("Non-finite redshift")
+
+        if np.any((z < self.z_min) | (z > self.z_max)):
+            raise ValueError("Redshift outside ionization history")
+
+        return z
+
+    def __call__(self, z):
+        return self._xe(self._check_z(z))
+
+    def x_HII(self, z):
+        return self._xHII(self._check_z(z))
+
+    def x_HI(self, z):
+        return 1.0 - self.x_HII(z)
+
+
+def build_recfast_ionization_history(
+    omega_m_h2,
+    omega_b_h2,
+    H0=67.49,
+    Omega_r0=8.600000001024455e-05,
+    YHe=0.245,
+    T0=2.7255,
+    Nnu=3.046,
+    npz=10000
+):
+
+    if recfast is None:
+        raise ImportError("Recfast++ validation requires the optional recfast4py package")
+    h = H0 / 100.0
+
+    Omega_m0 = omega_m_h2 / h**2
+    Omega_b0 = omega_b_h2 / h**2
+    Omega_k0 = 0.0
+
+    Omega_L0 = (
+        1.0 - Omega_r0 - Omega_m0
+    )
+
+    if not (0 < Omega_b0 <= Omega_m0):
+        raise ValueError("Invalid baryon/matter parameters")
+
+    z_rf, x_HII, x_HeII, x_e, T_m = recfast.Xe_frac(
+        YHe,
+        T0,
+        Omega_m0,
+        Omega_b0,
+        Omega_L0,
+        Omega_k0,
+        h,
+        Nnu,
+        1.14,     # RECFAST hydrogen fudge factor
+        0.0,      # No exotic energy injection
+        npz=npz,
+        zstart=10000,
+        zend=0.001
+    )
+
+    return IonizationHistory(
+        z=z_rf,
+        x_e=x_e,
+        x_HII=x_HII
+    )
+
+
+from scipy import constants as const
+
+def optical_depth_diagnostic(
+    frequencies,
+    omega_m_h2,
+    omega_b_h2,
+    H0=67.49
+):
+    """
+    Compare three 21-cm brightness-temperature calculations:
+
+    1. Original optically thin 27 mK approximation
+    2. Effective optical depth from 27 mK normalization
+    3. Direct optical depth from physical constants
+
+    All brightness temperatures are returned in Kelvin.
+    """
+
+    frequencies = np.asarray(frequencies, dtype=float)
+
+    if np.any(frequencies <= 0):
+        raise ValueError("Frequencies must be positive")
+
+    if not (0 < omega_b_h2 <= omega_m_h2):
+        raise ValueError("Invalid matter/baryon densities")
+
+    # =====================================================
+    # Cosmological parameters
+    # =====================================================
+
+    hubble_h = H0 / 100.0
+
+    Omega_r0 = 8.600000001024455e-05
+    Omega_m0 = omega_m_h2 / hubble_h**2
+    Omega_b0 = omega_b_h2 / hubble_h**2
+    Omega_k0 = 0.0
+
+    Omega_L0 = (
+        1.0 - Omega_r0 - Omega_m0 - Omega_k0
+    )
+
+    z = 1420.4 / frequencies - 1.0
+
+    # Tk integration expects ascending redshift.
+    z_ascending = np.sort(z)
+
+    # =====================================================
+    # CAMB ionization history
+    # =====================================================
+
+    camb_parameters = camb.set_params(
+        H0=H0,
+        ombh2=omega_b_h2,
+        omch2=omega_m_h2 - omega_b_h2,
+        As=As,
+        ns=ns
+    )
+
+    camb_data = camb.get_background(camb_parameters)
+
+    x_e = build_xe_interpolator(
+        camb_data,
+        z_ascending
+    )
+
+    # =====================================================
+    # Kinetic temperature
+    # =====================================================
+
+    T_k = Tk(
+        z_ascending,
+        Omega_r0,
+        omega_m_h2,
+        Omega_k0,
+        Omega_L0,
+        omega_b_h2,
+        H0
+    )[1]
+
+    # =====================================================
+    # Present-day hydrogen number density [cm^-3]
+    # Use the same normalization as the corrected model.
+    # =====================================================
+
+    p_crit = 1.88e-29 * hubble_h**2
+
+    n_H0 = (
+        (1.0 - y_P)
+        * Omega_b0
+        * p_crit
+        / m_p
+    )
+
+    # =====================================================
+    # Spin temperature and neutral hydrogen fraction
+    # =====================================================
+
+    T_s = np.asarray(
+        T_S_modH0(z, x_e, T_k, n_H0),
+        dtype=float
+    )
+
+    x_HI = np.asarray(
+        x_HI_modH0(z, x_e),
+        dtype=float
+    )
+
+    T_CMB = T_gamma0 * (1.0 + z)
+
+    if not np.all(np.isfinite(T_s)) or np.any(T_s <= 0):
+        raise ValueError("Invalid spin temperature")
+
+    # =====================================================
+    # Method 1: Original 27 mK approximation
+    # =====================================================
+
+    A_K = (
+        0.027
+        * x_HI
+        * (omega_b_h2 / 0.023)
+        * np.sqrt(
+            (0.15 / omega_m_h2)
+            * ((1.0 + z) / 10.0)
+        )
+    )
+
+    dTb_thin = A_K * (1.0 - T_CMB / T_s)
+
+    # =====================================================
+    # Method 2: Effective optical depth
+    # =====================================================
+
+    tau_effective = A_K * (1.0 + z) / T_s
+
+    prefactor = (T_s - T_CMB) / (1.0 + z)
+
+    dTb_effective = (
+        prefactor * (-np.expm1(-tau_effective))
+    )
+
+    # =====================================================
+    # Method 3: Direct physical optical depth
+    # =====================================================
+
+    H_z = H(
+        z,
+        Omega_r0,
+        Omega_m0,
+        Omega_k0,
+        Omega_L0,
+        H0
+    )
+
+    # Convert hydrogen number density:
+    # cm^-3 --> m^-3
+    n_HI_SI = (
+        n_H0 * 1e6
+        * (1.0 + z)**3
+        * x_HI
+    )
+
+    A10_SI = 2.85e-15
+    nu21_SI = 1.42040575177e9
+
+    tau_direct = (
+        3.0
+        * const.h
+        * const.c**3
+        * A10_SI
+        * n_HI_SI
+        / (
+            32.0
+            * np.pi
+            * const.k
+            * nu21_SI**2
+            * T_s
+            * H_z
+        )
+    )
+
+    dTb_direct = (
+        prefactor * (-np.expm1(-tau_direct))
+    )
+
+    # =====================================================
+    # Final checks
+    # =====================================================
+
+    for values in (
+        tau_effective,
+        tau_direct,
+        dTb_thin,
+        dTb_effective,
+        dTb_direct
+    ):
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Non-finite diagnostic result")
+
+    if np.any(tau_direct < 0):
+        raise ValueError("Negative physical optical depth")
+
+    if np.any(dTb_direct < -T_gamma0 - 1e-10):
+        raise ValueError("Brightness below CMB absorption floor")
+
+    return {
+        "frequencies": frequencies,
+        "redshift": z,
+        "T_s": T_s,
+        "T_k": T_k(z),
+        "x_HI": x_HI,
+        "tau_effective": tau_effective,
+        "tau_direct": tau_direct,
+        "dTb_thin": dTb_thin,
+        "dTb_effective": dTb_effective,
+        "dTb_direct": dTb_direct
+    }
+
 
 # Kinetic gas temperature with a  Runge-Kutta method of order 5(4)
 
-def Tk (z_array,omR0,omM0h2,omK0,omL0,omB0h2,H0):
-    """Creates an array evolving the IGM temperature based on adiabatic cooling and compton scattering. Only works for the cosmic 
-    Dark Ages, as it does not include UV
-    
-    ===================================================================
-    Parameters
-    ===================================================================
-    z_array: an array of increasing redshift values. Needs to be a sufficiently fine grid. 
-    As of now there is some considerable numerical instabilities when your z grid is > 0.01
-    omR0: Density prameter of radiation today
-    omM0: Density parameter of matter today
-    omK0: Density pramameter of curvature today
-    omL0: Density parameter of Dark Energy today
-    ===================================================================
-    Output
-    ===================================================================
-    Tk_array:  A 2-D array with each entry being the redshift and IGM temperature
-    Tk_function: Interpolated version of your Tk_array that acts like a function with
-                 redshift for its argument. Useful for future calculations.
-    cosmological_parameters: An output of the cosmo parameters used to make the curve (just returns your density parameter inputs)"""
-### Let's code up T_k 
-    # some important functions
+def Tk(z_array, omR0, omM0h2, omK0, omL0, omB0h2, H0, x_e_history=None):
+    """Integrate gas temperature over an ascending redshift grid.
 
-    # h = H0/100
-    # omM0 = omM0h2/h**2   # Omega matter today
-    # print(omM0)
-    h = H0/100
-    omM0 = omM0h2/h**2
-    omB0 = omB0h2/h**2
-    omC0 = omM0-omB0
-    parameters_camb = camb.set_params(H0=H0, ombh2=omB0h2, omch2=omC0*h**2, As=As, ns=ns)
-    camb_data= camb.get_background(parameters_camb)
-    camb_xe = camb_data.get_background_redshift_evolution(z_array, ["x_e"], format="array")
-    # or if you want an interpolated version:
-    camb_xe_interp = scipy.interpolate.CubicSpline(z_array,camb_xe.flatten())  # Needs a redshift argument
-    t_c = lambda z: 1.172e8*((1+z)/10)**(-4) * 3.154e7 #[seconds] timescale of compton scattering
-    x_e = camb_xe_interp   # this is our model for fraction of free electrons
-    adiabatic = lambda z,T:(1/(H(z,omR0,omM0,omK0,omL0,H0)*(1+z)))*(2*H(z,omR0,omM0,omK0,omL0,H0)*T)
-    compton = lambda z,T: (1/(H(z,omR0,omM0,omK0,omL0,H0)*(1+z)))*((x_e(z))/(1+f_He+x_e(z)))*((T_gamma(z)-T)/(t_c(z)))
-    z_start = z_array[-1]
-    z_end = z_array[0]
+    ``x_e_history`` is a callable x_e(z). When omitted, use CAMB for the
+    requested cosmology; pass a Recfast++ history for consistency with x_HI.
+    Returns (integration samples, callable temperature, cosmology parameters).
+    """
+    z_array = np.asarray(z_array, dtype=float).ravel()
+    if z_array.size < 2 or not np.all(np.isfinite(z_array)):
+        raise ValueError("z_array must contain at least two finite redshifts")
+    if z_array[0] < 0 or np.any(np.diff(z_array) <= 0):
+        raise ValueError("z_array must be strictly increasing and nonnegative")
+    h_local = H0 / 100.0
+    omM0 = omM0h2 / h_local**2
+    omB0 = omB0h2 / h_local**2
+    if not (0 < omB0 <= omM0):
+        raise ValueError("Require 0 < Omega_b <= Omega_m")
 
-    ### Let's code up T_k
-    ## The heating / cooling processes ##
+    if x_e_history is None:
+        parameters_camb = camb.set_params(
+            H0=H0, ombh2=omB0h2, omch2=omM0h2 - omB0h2,
+            As=As, ns=ns
+        )
+        camb_data_local = camb.get_background(parameters_camb)
+        # Give the interpolator a small margin around the ODE endpoints.
+        # Radau may evaluate just outside the nominal integration interval
+        # due to floating-point rounding at its collocation nodes.
+        z_margin = max(1e-5, 1e-7 * float(z_array[-1]))
+        z_xe_bounds = np.array([
+            max(0.0, float(z_array[0]) - z_margin),
+            float(z_array[-1]) + z_margin
+        ])
+        x_e_history = build_xe_interpolator(camb_data_local, z_xe_bounds)
 
-    T0 = np.array([T_gamma(z_array[-1])])   # your initial temperature at the highest redshift. This assumes it is coupled fully to the CMB at that time.
-    z0 = z_array[-1]    # defines your starting z (useful for the loop below)
-    z_span = (z_start,z_end)
-    func = lambda z,T: adiabatic(z,T) - compton(z,T)
+    def rhs(z, T):
+        xe = float(np.asarray(x_e_history(z)))
+        if not np.isfinite(xe) or xe < 0:
+            raise ValueError(f"Invalid electron fraction at z={z}: {xe}")
+        Hz = H(z, omR0, omM0, omK0, omL0, H0)
+        t_c = 1.172e8 * ((1 + z) / 10)**(-4) * 3.154e7
+        return 2 * T / (1 + z) - (
+            xe / (1 + f_He + xe)
+        ) * (T_gamma(z) - T) / (Hz * (1 + z) * t_c)
 
-    # Solve the differential equation
-    sol = solve_ivp(func, z_span, T0, dense_output=True, method='Radau')  # solve_ivp is WAY WAY WAY faster and plenty precise enough for what we're doing
+    sol = solve_ivp(
+        rhs, (float(z_array[-1]), float(z_array[0])),
+        [float(T_gamma(z_array[-1]))], method="Radau",
+        dense_output=True, rtol=TK_RTOL, atol=TK_ATOL
+    )
+    if not sol.success:
+        raise RuntimeError(f"Kinetic temperature integration failed: {sol.message}")
 
-    # Access the solution
-    z = sol.t
-    T = sol.y[0]
+    def Tk_function(z_eval):
+        z_eval = np.asarray(z_eval, dtype=float)
+        if np.any(~np.isfinite(z_eval)) or np.any(z_eval < z_array[0]) or np.any(z_eval > z_array[-1]):
+            raise ValueError("Temperature evaluation outside integrated redshift range")
+        return sol.sol(z_eval)[0]
 
-    Tk_function=scipy.interpolate.CubicSpline(z[::-1],T[::-1])  # Turns our output into a function with redshift as an argument  
-    T_array = np.array([z,T])  
-
-    Tk_function=scipy.interpolate.CubicSpline(z[::-1],T[::-1])  # Turns our output into a function with redshift as an argument 
-    cosmological_parameters = np.array([omR0,omM0,omK0,omL0])   
-    return T_array, Tk_function, cosmological_parameters
-
-My_Tk = Tk(z_array,omR0,omM0h2,omK0,omL0,omB0h2,H0)
-
-def lambdaCDM_training_set(frequency_array,parameters,N,verbose=True):
-    """"Creates a training set based on the error range of the Lambda CDM cosmological constants for the fiducial 21 cm signal
-    (no exotic physics).
-    Parameters
-    ===================================================
-    frequency_array: array of frequencies to calculate the curve at. array-like.
-    parameters: Set of mean values and standard deviation of your parameters. Make sure the order matches the order of the function
-                As of writing this that order is: omR0,omM0,omK0,omL0,omB0,H0. Shape should be, in this example, (5,2), with the first 
-                column being the mean and the second being the standard deviation.
-    N: The number of curves you would like to have in your training set. Interger
-    bin_number: The number of bins in frequency space used to make the curves. Recommend 250 for LuSEE-Night as of the time writing this.
-    
-    Returns
-    ====================================================
-    training_set: An array with your desired number of varied fiducial 21 cm curves
-    training_set_params: Parameters associated with each curve."""
-
-    training_set = np.ones((N,len(frequency_array)))    # dummy array for the expanded training set
-    training_set_params = np.ones((N,len(parameters)))  # dummy array for the parameters of this expanded set.
-    # Note: The divide by 2 is there 
+    return (np.vstack((sol.t, sol.y[0])), Tk_function,
+            np.array([omR0, omM0, omK0, omL0]))
 
 
+def fiducial_thermal_history():
+    """Return the shared fiducial CAMB electron and gas-temperature histories."""
+    z_thermal = np.linspace(float(z_array[0]), 2000.0, 4000)
+    params = camb.set_params(
+        H0=H0, ombh2=omB0h2, omch2=omM0h2 - omB0h2,
+        As=As, ns=ns
+    )
+    background = camb.get_background(params)
+    history = build_xe_interpolator(background, z_thermal)
+    thermal = Tk(
+        z_thermal, omR0, omM0h2, 0.0,
+        1.0 - omR0 - omM0h2 / (H0 / 100.0)**2,
+        omB0h2, H0, x_e_history=history
+    )
+    return history, thermal
 
 
-    for n in range(N):   # this will create our list of new parameters that will be randomly chosen from within the original training set's parameter space.
-        new_params = np.array([])
-        for k in range(len(parameters)):  # this will create a new set of random parameters for each instance
-            new_params = np.append(new_params,np.random.normal(loc=parameters[k][0],scale=parameters[k][1]))
-        training_set_params[n] = new_params
+# Initialize lazily: importing this module must not launch a stiff ODE solve.
+_fiducial_history_cache = None
 
-    redshift_array = 1420.4/frequency_array-1 
-    redshift_array = redshift_array[::-1]      # need to convert to redshift since all of our functions are in redshift
-    if verbose:
-        for n in tqdm(range(N)):
-            R,Mh2,K,L,Bh2,h1=training_set_params[n]
-            h = h1/100
-            omM0 = Mh2/h**2
-            omB0 = Bh2/h**2
-            omC0 = omM0-omB0
-            parameters_camb = camb.set_params(H0=H0, ombh2=Bh2, omch2=omC0*h**2, As=As, ns=ns)
-            camb_data= camb.get_background(parameters_camb)
-            camb_xe = camb_data.get_background_redshift_evolution(redshift_array, ["x_e"], format="array")
-            # or if you want an interpolated version:
-            camb_xe_interp = scipy.interpolate.CubicSpline(redshift_array,camb_xe.flatten())  # Needs a redshift argumen
-            T_k = Tk(redshift_array,R,Mh2,K,L,Bh2,h1)[1]   # calculate our kinetic temperature to plug into the dTb function
-            p_crit = 1.88e-29*h**2 
-            n_b0 = (1-y_P)*omB0*p_crit/m_p+y_P*omB0*p_crit/m_He 
-            dTb_element=dTb_modH0(redshift_array,camb_xe_interp,T_k,omB0,omM0,n_b0,h)*10**(-3)   # Need to convert back to Kelvin
-            dTb_element=dTb_element[::-1]   # You have to flip it again because of the way dTb calculates based on redshift (needs previous higher redshift to calculate next redshift)
-            training_set[n] = dTb_element
-    else:
-        for n in range(N):
-            R,Mh2,K,L,Bh2,h1=training_set_params[n]
-            h = h1/100
-            omM0 = Mh2/h**2
-            omB0 = Bh2/h**2
-            omC0 = omM0-omB0
-            parameters_camb = camb.set_params(H0=H0, ombh2=Bh2, omch2=omC0*h**2, As=As, ns=ns)
-            camb_data= camb.get_background(parameters_camb)
-            camb_xe = camb_data.get_background_redshift_evolution(redshift_array, ["x_e"], format="array")
-            # or if you want an interpolated version:
-            camb_xe_interp = scipy.interpolate.CubicSpline(redshift_array,camb_xe.flatten())  # Needs a redshift argumen
-            T_k = Tk(redshift_array,R,Mh2,K,L,Bh2,h1)[1]   # calculate our kinetic temperature to plug into the dTb function
-            p_crit = 1.88e-29*h**2 
-            n_b0 = (1-y_P)*omB0*p_crit/m_p+y_P*omB0*p_crit/m_He 
-            dTb_element=dTb_modH0(redshift_array,camb_xe_interp,T_k,omB0,omM0,n_b0,h)*10**(-3)   # Need to convert back to Kelvin
-            dTb_element=dTb_element[::-1]   # You have to flip it again because of the way dTb calculates based on redshift (needs previous higher redshift to calculate next redshift)
-            training_set[n] = dTb_element
-    
-    return training_set, training_set_params, n_b0, p_crit
+
+def get_fiducial_thermal_history():
+    global _fiducial_history_cache
+    if _fiducial_history_cache is None:
+        _fiducial_history_cache = fiducial_thermal_history()
+    return _fiducial_history_cache
+
+
+def lambdaCDM_training_set(frequency_array, parameters, N, verbose=True):
+    """Generate ΛCDM signals with consistent CAMB x_e and T_k.
+
+    Parameters are (Omega_r, omega_m h^2, Omega_k, Omega_L,
+    omega_b h^2, H0). Flatness is imposed, so sampled curvature and
+    dark-energy values are replaced by Omega_k=0 and closure Omega_L.
+    Retains the original four-value return signature.
+    """
+    frequency_array = np.asarray(frequency_array, dtype=float)
+    if frequency_array.ndim != 1 or frequency_array.size < 2 or np.any(frequency_array <= 0):
+        raise ValueError("frequency_array must be a positive 1-D array")
+    if np.any(np.diff(frequency_array) <= 0):
+        raise ValueError("frequency_array must be strictly increasing")
+    parameters = np.asarray(parameters, dtype=float)
+    if parameters.shape != (6, 2):
+        raise ValueError("parameters must have shape (6, 2)")
+    if np.any(parameters[:, 1] < 0):
+        raise ValueError("Parameter standard deviations must be nonnegative")
+    training_set = np.empty((N, frequency_array.size))
+    training_set_params = np.empty((N, 6))
+    redshift_array = (1420.4 / frequency_array - 1.0)[::-1]
+    if redshift_array[0] < 0 or np.any(np.diff(redshift_array) <= 0):
+        raise ValueError("Frequencies must correspond to increasing nonnegative redshift")
+
+    iterator = tqdm(range(N)) if verbose else range(N)
+    for n in iterator:
+        R, Mh2, _K, _L, Bh2, H0_sample = np.random.normal(
+            parameters[:, 0], parameters[:, 1]
+        )
+        h_local = H0_sample / 100.0
+        if h_local <= 0 or not (0 < Bh2 <= Mh2):
+            raise ValueError("Sampled unphysical H0, omega_b h^2, or omega_m h^2")
+        M = Mh2 / h_local**2
+        B = Bh2 / h_local**2
+        K = 0.0
+        L = 1.0 - R - M
+        if L < 0:
+            raise ValueError("Sampled negative Omega_L under flatness closure")
+        training_set_params[n] = [R, Mh2, K, L, Bh2, H0_sample]
+
+        params = camb.set_params(
+            H0=H0_sample, ombh2=Bh2, omch2=Mh2 - Bh2,
+            As=As, ns=ns
+        )
+        background = camb.get_background(params)
+        # Integrate from z=2000, above the full 1–50 MHz observing band.
+        z_thermal = np.linspace(
+            float(redshift_array[0]),
+            max(2000.0, float(redshift_array[-1]) + 1.0),
+            4000
+        )
+        # Extend the electron-history interpolation slightly beyond
+        # the thermal integration boundaries.
+        z_margin = max(1e-5, 1e-7 * float(z_thermal[-1]))
+
+        z_xe = np.linspace(
+         max(0.0, float(z_thermal[0]) - z_margin),
+            float(z_thermal[-1]) + z_margin,
+            len(z_thermal)
+        )
+
+        history = build_xe_interpolator(background, z_xe)
+        T_k = Tk(
+            z_thermal, R, Mh2, K, L, Bh2, H0_sample,
+            x_e_history=history
+        )[1]
+        p_crit = 1.88e-29 * h_local**2
+        n_b0_local = (
+            (1 - y_P) * B * p_crit / m_p
+            + y_P * B * p_crit / m_He
+        )
+        # CAMB supplies free electrons per hydrogen nucleus; 1-clip(x_e,0,1)
+        # approximates the hydrogen neutral fraction (validated for our band).
+        signal = dTb_modH0(
+            redshift_array, history, T_k, B, M, n_b0_local, h_local
+        ) * 1e-3
+        training_set[n] = np.asarray(signal)[::-1]
+
+    return training_set, training_set_params, n_b0_local, p_crit
 
 # This is our custom T_k code with Dark Matter Self-Annihilation
 def Tk_DMAN (z_array,f_dman_e_0,omR0=omR0,omM0=omM0,omK0=omK0,omL0=omL0,C_Tk=5.5,C_dxe=0.25):
@@ -497,7 +1086,13 @@ def DMAN_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=om
     training_set: An array with your desired number of varied 21 cm curves
     training_set_params: Parameters associated with each curve"""
     derp = parameters[0][1]
-    redshift_array=np.arange(20,1100,0.01)
+    if T_k is None or x_e is None:
+        history, thermal = get_fiducial_thermal_history()
+        if T_k is None:
+            T_k = thermal[1]
+        if x_e is None:
+            x_e = history
+    redshift_array=np.linspace(20, 1099, 107901)
     training_set_rs = np.ones((N,len(redshift_array)))    # dummy array for the expanded training set in redshift
     training_set = np.ones((N,len(frequency_array)))      # dummy array for the expanded training set in frequency
     if N == 1:
@@ -1110,7 +1705,7 @@ def EDE_training_set(frequency_array,parameters,N,gaussian=False,B = omB0, M=omM
 # This will be our ERB model
 
 
-def ERB_model (z_array,A_r_value,frequency,starting_point,smoothing,T_k=My_Tk[1],x_e=camb_xe_interp,smoothing_factor = 0):
+def ERB_model (z_array,A_r_value,frequency,starting_point,smoothing,T_k=None,x_e=None,smoothing_factor = 0):
     """Creates the Excess Radio Background model to see how it effects the 21cm dark ages trough
     
     Parameters
@@ -1136,10 +1731,17 @@ def ERB_model (z_array,A_r_value,frequency,starting_point,smoothing,T_k=My_Tk[1]
     ===================================================
     ERB_function: The interpolation function created from the ERB model. Can input redshift to get a plot"""
 
+    if T_k is None or x_e is None:
+        history, thermal = get_fiducial_thermal_history()
+        if T_k is None:
+            T_k = thermal[1]
+        if x_e is None:
+            x_e = history
+
     # The upper limit of the 21 cm temperature:
     lambda_21 = 21  # wavelength of 21cm line [cm]
     max_temp = lambda z,x_e,T_k: -1000*(n_H(z,x_e)*k_HH(T_k(z))+n_e(z,x_e)*k_eH(T_k(z)))*(3*h_pl*c*lambda_21**2*n_H(z,x_e)*T_star)/(32*np.pi*kb*(1+z)*H(z,omR0,omM0,omK0,omL0)*T_k(z))  #[mK]
-    max_temp_interp=scipy.interpolate.CubicSpline(z_array,max_temp(z_array,camb_xe_interp,My_Tk[1]))
+    max_temp_interp=scipy.interpolate.CubicSpline(z_array,max_temp(z_array,x_e,T_k))
 
     alpha = -2.6   # dimensionless quantity that defines the spectral index of the signal
     nu_obs = lambda z: 1420/(1+z)  # [MHz] observed frequency of the 21 cm line
@@ -1154,7 +1756,7 @@ def ERB_model (z_array,A_r_value,frequency,starting_point,smoothing,T_k=My_Tk[1]
     ERB_function = scipy.interpolate.CubicSpline(z_array,dTb(z_array,x_e,T_k))
     return ERB_function
 
-def ERB_training_set(frequency_array,parameters,N,T_k=My_Tk[1],x_e=camb_xe_interp,gaussian=False,B = omB0, M=omM0,verbose=True):
+def ERB_training_set(frequency_array,parameters,N,T_k=None,x_e=None,gaussian=False,B = omB0, M=omM0,verbose=True):
     """"Creates a training set of singal curves based on the parameter range of the excess radio background model.
     
     Parameters
@@ -1205,13 +1807,13 @@ def ERB_training_set(frequency_array,parameters,N,T_k=My_Tk[1],x_e=camb_xe_inter
     if verbose:
         for n in tqdm(range(N)):
             z_s,Ar=training_set_params[n]
-            ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k)  # calculates the ERB model
+            ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k,x_e)  # calculates the ERB model
             ERB_element=ERB_function(redshift_array)  # Need to convert back to Kelvin
             training_set_rs[n] = ERB_element
     else:
         for n in tqdm(range(N)):
             z_s,Ar=training_set_params[n]
-            ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k)  # calculates the ERB model
+            ERB_function = ERB_model(redshift_array,Ar,78,z_s,0.2,T_k,x_e)  # calculates the ERB model
             ERB_element=ERB_function(redshift_array)  # Need to convert back to Kelvin
             training_set_rs[n] = ERB_element
         # Now we need to interpolate back to frequency
